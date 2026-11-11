@@ -1,0 +1,77 @@
+name: Build HakiOS 26 RootFS (Userdata Sparse Image)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ipsw_url:
+        description: 'Direct Apple IPSW URL for iOS 26 / HakiOS (Leave empty to use default)'
+        required: false
+        default: ''
+      device:
+        description: 'Apple Device Identifier (e.g. iPad8,1)'
+        required: false
+        default: 'iPad8,1'
+      build_version:
+        description: 'Target OS Version (e.g. 26.0)'
+        required: false
+        default: '26.0'
+
+jobs:
+  build-rootfs:
+    runs-on: macos-15
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          brew install blacktop/tap/ipsw zstd
+
+      - name: Verify Dyld Shared Cache Flattener
+        run: |
+          python3 tools/dsc_flatten_v2.py --test
+
+      - name: Fetch Root DMGs
+        run: |
+          mkdir -p research/ios26/ipsw
+          if [ -n "${{ github.event.inputs.ipsw_url }}" ]; then
+            URL="${{ github.event.inputs.ipsw_url }}"
+            python3 tools/renegade/fetch_root.py --url "$URL" --out-dir research/ios26/ipsw
+          else
+            python3 tools/renegade/fetch_root.py --device "${{ github.event.inputs.device }}" --version "${{ github.event.inputs.build_version }}" --out-dir research/ios26/ipsw
+          fi
+
+      - name: Build Root Image with Renegade & DSC Flattener
+        run: |
+          mkdir -p out
+          python3 tools/renegade/mkroot-full.py \
+            --ipsw-dir research/ios26/ipsw \
+            --out out/ios-root.img \
+            --simg out/userdata.simg \
+            --delete-sources \
+            --size 16g
+
+      - name: Verify Generated Sparse Image
+        run: |
+          ls -lh out/ || true
+          mkdir -p out/parts
+          if [ -f out/userdata.simg ]; then
+            echo "Successfully generated userdata.simg"
+            # Split if larger than 2GB for GitHub artifact upload limits
+            split -b 1900M out/userdata.simg out/parts/userdata.simg.part_
+            echo "To join split parts on Windows: copy /b userdata.simg.part_* userdata.simg" > out/parts/HOW_TO_JOIN.txt
+            echo "To join split parts on macOS/Linux: cat userdata.simg.part_* > userdata.simg" >> out/parts/HOW_TO_JOIN.txt
+            echo "Then flash: fastboot -S 512M flash userdata userdata.simg" >> out/parts/HOW_TO_JOIN.txt
+          fi
+
+      - name: Upload RootFS Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipados-xun-rootfs
+          path: out/parts/
+          if-no-files-found: error

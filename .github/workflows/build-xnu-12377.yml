@@ -1,0 +1,153 @@
+name: Build XNU 12377 (iPadOS 26, xun)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "kernel/**"
+      - "base/**"
+      - "enxerto/**"
+      - "tools/**"
+      - "sapphire.adt"
+      - "xun.adt"
+      - "kernel/hfs/**"
+      - ".github/workflows/build-xnu-12377.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          brew install jq bash cmake ninja ccache aarch64-elf-gcc aarch64-elf-binutils
+          sw_vers
+          xcodebuild -version
+          # Ensure all scripts and host tools have executable permissions
+          chmod -R +x base/xnu-deps/host/bin base/*.sh kernel/*.sh tools/*.py enxerto/*.py enxerto/*.sh
+
+      - name: Prepare XNU 12377 source tree
+        run: |
+          echo "Cloning XNU 12377.121.6 and applying the port patches (dada base, PAC/LSE/4K, eMMC root + HFS)..."
+          bash kernel/apply.sh xnu-src
+
+      - name: Setup XNU build environment
+        run: |
+          export XNU_SRC="$PWD/xnu-src"
+          export XNU_ARCH=arm64e
+          export MACHINE=BCM2837
+          export RC_DARWIN_KERNEL_VERSION=26.0.0
+          export RC_ProjectSourceVersion=12377.121.6
+          export RC_ProjectName=xnu
+          export XNU_SDK_VERSION=26.0
+
+          cd base/xnu-deps
+          bash setup.sh --stage1
+          cd ../..
+          chmod -R +x base/xnu-deps/host/bin base/xnu-deps/build/pthread/*.sh
+
+          # Install availability.pl and internal headers into host Xcode iPhoneOS SDK
+          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+          echo "Xcode iPhoneOS SDK path: $SDK_PATH"
+          sudo mkdir -p "$SDK_PATH/usr/local/libexec" "$SDK_PATH/usr/local/include/kernel/os" "$SDK_PATH/usr/local/lib/kernel"
+
+          if [ -f base/xnu-deps/AvailabilityVersions/availability.pl ]; then
+            sudo cp base/xnu-deps/AvailabilityVersions/availability.pl "$SDK_PATH/usr/local/libexec/"
+            sudo chmod +x "$SDK_PATH/usr/local/libexec/availability.pl"
+            echo "Installed availability.pl to $SDK_PATH/usr/local/libexec/availability.pl"
+          fi
+
+          if [ -d base/xnu-deps/sdk/iPhoneOS.xnu.sdk/usr/local ]; then
+            sudo cp -R base/xnu-deps/sdk/iPhoneOS.xnu.sdk/usr/local/. "$SDK_PATH/usr/local/" 2>/dev/null || true
+            echo "Synced overlay usr/local headers to $SDK_PATH/usr/local"
+          fi
+
+          # Compile architecture and subsystem stubs into kernel/stubs.o
+          echo "Compiling HakiOS Sapphire kernel stubs..."
+          xcrun -sdk iphoneos clang -arch arm64e -target arm64e-apple-ios26.0 -mkernel -c kernel/stubs.c -o kernel/stubs.o
+
+          # Create static libraries for SDK with all required symbols
+          sudo xcrun -sdk iphoneos libtool -static -o "$SDK_PATH/usr/local/lib/kernel/libfirehose_kernel.a" kernel/stubs.o
+          sudo xcrun -sdk iphoneos libtool -static -o "$SDK_PATH/usr/local/lib/kernel/libpthread_kext.a" kernel/stubs.o
+
+          # Install into overlay SDK and target build obj dir
+          mkdir -p base/xnu-deps/sdk/iPhoneOS.xnu.sdk/usr/local/lib/kernel xnu-src/BUILD/obj/DEVELOPMENT_ARM64_BCM2837
+          sudo cp -v "$SDK_PATH/usr/local/lib/kernel/"*.a base/xnu-deps/sdk/iPhoneOS.xnu.sdk/usr/local/lib/kernel/
+          cp -v "$SDK_PATH/usr/local/lib/kernel/"*.a xnu-src/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/
+
+      - name: Compile XNU Kernel
+        run: |
+          export XNU_SRC="$PWD/xnu-src"
+          export XNU_ARCH=arm64e
+          export MACHINE=BCM2837
+          export RC_DARWIN_KERNEL_VERSION=26.0.0
+          export RC_ProjectSourceVersion=12377.121.6
+          export RC_ProjectName=xnu
+          export XNU_SDK_VERSION=26.0
+          export XNU_SDK_PATH="$(xcrun --sdk iphoneos --show-sdk-path)"
+          export LIBRARY_PATH="$(xcrun --sdk iphoneos --show-sdk-path)/usr/local/lib/kernel:$PWD/base/xnu-deps/sdk/iPhoneOS.xnu.sdk/usr/local/lib/kernel:$LIBRARY_PATH"
+          bash base/xnu-build.sh -j$(sysctl -n hw.ncpu) -k
+          ls -la xnu-src/BUILD/obj/*/mach.* 2>/dev/null || true
+
+      - name: Package Payload and Boot Image
+        run: |
+          mkdir -p out
+          KERNEL=""
+          for k in $(find xnu-src/BUILD/obj -name 'mach.*' -type f 2>/dev/null); do
+            if file "$k" | grep -q 'Mach-O'; then
+              KERNEL="$k"
+              break
+            fi
+          done
+          if [ -n "$KERNEL" ]; then
+            echo "Found compiled Mach-O kernel: $KERNEL"
+            python3 tools/verify_kernel_markers.py "$KERNEL"
+            python3 kernel/patch_kernel_pac.py "$KERNEL"
+            cp "$KERNEL" out/mach.development.bcm2837
+            echo "Building Mockfs RAMDisk for md0 with PID 1 launchd..."
+            python3 tools/mkramdisk.py --format mockfs --arch arm64e out/ramdisk.img
+            python3 tools/patch_userland_pac.py out/ramdisk.img
+            python3 tools/mkpayload.py --compress \
+              --cmdline "-v debug=0xc serial=0 cpus=1 keepsyms=1 -enable_kprintf_spam sweetearlyfb=1 sweethidtest=3 ipc_legacy=1 cs_enforcement_disable=1 amfi_get_out_of_my_way=1 rootless=0 rd=md0" \
+              --ramdisk out/ramdisk.img \
+              "$KERNEL" sapphire.adt out/payload.bin
+            # 1. smoke image: mockfs RAM disk as the root (rd=md0), for a quick "does the
+            #    kernel get to user space" boot without touching the pad's storage.
+            python3 enxerto/build.py --board xun --payload out/payload.bin --skip-host-tests
+            if [ -f enxerto/out/enxerto-boot.img ]; then
+              cp enxerto/out/enxerto-boot.img out/enxerto-boot-md0.img
+              echo "Packaged enxerto-boot-md0.img into out/ successfully!"
+            fi
+            # 2. the real image: root on the pad's eMMC (userdata), HFS+ root volume.
+            python3 tools/mkpayload.py --compress \
+              --cmdline "-v debug=0xc serial=3 cpus=4 keepsyms=1 -enable_kprintf_spam sweetearlyfb=1 ipc_legacy=1 cs_enforcement_disable=1 amfi_get_out_of_my_way=1 rootless=0 ignition_level=1 unentitled_ios_sim_launch=1 launchd_unsecure_cache=1 wdt=-1 rd=emmcroot0 emmcroot=userdata rootrw=1" \
+              "$KERNEL" xun.adt out/payload-emmc.bin
+            python3 enxerto/build.py --board xun --payload out/payload-emmc.bin --skip-host-tests
+            if [ -f enxerto/out/enxerto-boot.img ]; then
+              cp enxerto/out/enxerto-boot.img out/enxerto-boot.img
+              echo "Packaged enxerto-boot.img (eMMC root) into out/ successfully!"
+            fi
+            python3 tools/verify_xun_adt.py
+            if [ -f enxerto/out/bergamota-fastboot.img ]; then
+              cp enxerto/out/bergamota-fastboot.img out/
+            fi
+          else
+            echo "ERROR: Compiled kernel binary not found!"
+            exit 1
+          fi
+          ls -la out/ || true
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios26-xun
+          path: |
+            out/enxerto-boot.img
+            out/enxerto-boot-md0.img
+            out/mach.development.bcm2837
+            out/xun.adt
+          if-no-files-found: warn

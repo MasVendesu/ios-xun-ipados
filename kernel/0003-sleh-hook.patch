@@ -1,0 +1,35 @@
+diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
+index 6dd7377..bc31234 100644
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -806,6 +806,17 @@ sleh_synchronous(arm_context_t *context, uint64_t esr, vm_offset_t far, __unused
+ #endif
+ 	bool is_user = PSR64_IS_USER(get_saved_state_cpsr(state));
+ 
++	extern bool pac_patch_handle_trap(arm_saved_state_t *state, bool is_user);
++	extern bool lse_patch_handle_trap(arm_saved_state_t *state, bool is_user);
++	if (class == 0) {
++		if (pac_patch_handle_trap(state, is_user)) {
++			return;
++		}
++		if (lse_patch_handle_trap(state, is_user)) {
++			return;
++		}
++	}
++
+ 	if (is_user && class != ESR_EC_SVC_64) {
+ 		/* hakios: the first user-mode faults, on one line each, before they become signals */
+ 		static uint32_t hk_user_faults;
+diff --git a/osfmk/conf/files.arm64 b/osfmk/conf/files.arm64
+index 311f62d..b4ac0b7 100644
+--- a/osfmk/conf/files.arm64
++++ b/osfmk/conf/files.arm64
+@@ -132,6 +132,8 @@ osfmk/arm64/gic_v3_irq.c	optional nos_arm_asm
+ osfmk/arm64/psci_smp.c	optional nos_arm_asm
+ osfmk/arm64/hakios_prof.c	standard
+ osfmk/arm64/hakios_cpu_idle.c	standard
++osfmk/arm64/pac_patch.c	standard
++osfmk/arm64/lse_patch.c	standard
+ 
+ # ECC Support
+ osfmk/kern/ecc_init.c		standard

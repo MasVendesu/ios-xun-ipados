@@ -1,0 +1,170 @@
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+index 72b5d50..ccaf1a9 100644
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -453,6 +453,14 @@ arm_init(
+ 			PAGE_SHIFT_CONST = ARM_PGSHIFT;
+ 		}
+ 
++#if defined(BCM2837)
++		/*
++		 * hakios on SM6225: always advertise 16KB VM page size for arm64e ABI compatibility.
++		 * Hardware 4KB translation granule uses Quad-PTE emulation.
++		 */
++		PAGE_SHIFT_CONST = PAGE_MAX_SHIFT;
++#endif
++
+ 		/* 32-bit apps always see 16KB page size */
+ 		page_shift_user32 = PAGE_MAX_SHIFT;
+ #ifdef  APPLETYPHOON
+diff --git a/osfmk/arm/pmap/pmap.c b/osfmk/arm/pmap/pmap.c
+index a18749e..d222a22 100644
+--- a/osfmk/arm/pmap/pmap.c
++++ b/osfmk/arm/pmap/pmap.c
+@@ -678,6 +678,45 @@ pte_is_xs(const pt_attr_t *pt_attr, pt_entry_t pte)
+  *            in this value will automatically be incremented for each PTE
+  *            write.
+  */
++static inline void
++arm64_quad_pte_write(pt_entry_t *ptep, pt_entry_t pte0, pt_entry_t pte1, pt_entry_t pte2, pt_entry_t pte3)
++{
++	__asm__ volatile (
++		"stp %0, %1, [%4]\n"
++		"stp %2, %3, [%4, #16]\n"
++		"dc civac, %4\n"
++		"dsb sy\n"
++		"isb\n"
++		:
++		: "r"(pte0), "r"(pte1), "r"(pte2), "r"(pte3), "r"(ptep)
++		: "memory"
++	);
++}
++
++static inline void
++pmap_quad_tlb_invalidate(pmap_t pmap, vm_offset_t va)
++{
++	uint32_t asid = (pmap != NULL) ? pmap->hw_asid : 0;
++	uint64_t v_base = ((uint64_t)asid << 48) | ((va >> 12) & 0x00000FFFFFFFFFFFULL);
++	uint64_t v0 = v_base;
++	uint64_t v1 = v_base + 1ULL;
++	uint64_t v2 = v_base + 2ULL;
++	uint64_t v3 = v_base + 3ULL;
++
++	__asm__ volatile (
++		"dsb ishst\n"
++		"tlbi vale1is, %0\n"
++		"tlbi vale1is, %1\n"
++		"tlbi vale1is, %2\n"
++		"tlbi vale1is, %3\n"
++		"dsb ish\n"
++		"isb\n"
++		:
++		: "r"(v0), "r"(v1), "r"(v2), "r"(v3)
++		: "memory"
++	);
++}
++
+ static void
+ write_pte_fast(pt_entry_t *ptep, pt_entry_t pte)
+ {
+@@ -699,15 +733,13 @@ write_pte_fast(pt_entry_t *ptep, pt_entry_t pte)
+ 			 * If we're writing an empty/compressed PTE value, then don't
+ 			 * auto-increment the address for each PTE write.
+ 			 */
+-			*ptep = pte;
+-			*(ptep + 1) = pte;
+-			*(ptep + 2) = pte;
+-			*(ptep + 3) = pte;
++			arm64_quad_pte_write(ptep, pte, pte, pte, pte);
+ 		} else {
+-			*ptep = pte;
+-			*(ptep + 1) = pte | 0x1000;
+-			*(ptep + 2) = pte | 0x2000;
+-			*(ptep + 3) = pte | 0x3000;
++			pt_entry_t pte0 = pte;
++			pt_entry_t pte1 = (pte & ~ARM_PTE_PAGE_MASK) | ((pte & ARM_PTE_PAGE_MASK) + 0x1000ULL);
++			pt_entry_t pte2 = (pte & ~ARM_PTE_PAGE_MASK) | ((pte & ARM_PTE_PAGE_MASK) + 0x2000ULL);
++			pt_entry_t pte3 = (pte & ~ARM_PTE_PAGE_MASK) | ((pte & ARM_PTE_PAGE_MASK) + 0x3000ULL);
++			arm64_quad_pte_write(ptep, pte0, pte1, pte2, pte3);
+ 		}
+ 	} else {
+ 		*ptep = pte;
+@@ -5943,6 +5975,9 @@ pmap_enter_pte(pmap_t pmap, pt_entry_t *pte_p, pt_entry_t *old_pte, pt_entry_t n
+ 				need_strong_sync = true;
+ 			}
+ #endif /* HAS_FEAT_XS */
++			if (TEST_PAGE_RATIO_4) {
++				pmap_quad_tlb_invalidate(pmap, v);
++			}
+ 			PMAP_UPDATE_TLBS(pmap, v, v + amount, need_strong_sync, true);
+ 		} else {
+ 			FLUSH_PTE();
+@@ -8835,7 +8870,7 @@ pmap_map_globals(
+ #endif /* __ARM_KERNEL_PROTECT__ */
+ 	pte |= ARM_PTE_ATTRINDX(CACHE_ATTRINDX_WRITEBACK);
+ 	pte |= ARM_PTE_SH(SH_OUTER_MEMORY);
+-	*ptep = pte;
++	write_pte_fast(ptep, pte);
+ 	FLUSH_PTE();
+ 	PMAP_UPDATE_TLBS(kernel_pmap, LOWGLOBAL_ALIAS, LOWGLOBAL_ALIAS + PAGE_SIZE, false, true);
+ 
+diff --git a/osfmk/arm64/proc_reg.h b/osfmk/arm64/proc_reg.h
+index 563d118..bc660e9 100644
+--- a/osfmk/arm64/proc_reg.h
++++ b/osfmk/arm64/proc_reg.h
+@@ -983,7 +983,10 @@
+ #define TCR_TG0_GRANULE_64KB    (1ULL << TCR_TG0_GRANULE_SHIFT)
+ #define TCR_TG0_GRANULE_16KB    (2ULL << TCR_TG0_GRANULE_SHIFT)
+ 
+-#if __ARM_16K_PG__
++#if defined(BCM2837)
++/* Snapdragon 685 SM6225 Cortex-A73/A53 baseline: TGran16==0, hardware requires 4KB granule */
++#define TCR_TG0_GRANULE_SIZE    (TCR_TG0_GRANULE_4KB)
++#elif __ARM_16K_PG__
+ #define TCR_TG0_GRANULE_SIZE    (TCR_TG0_GRANULE_16KB)
+ #else
+ #define TCR_TG0_GRANULE_SIZE    (TCR_TG0_GRANULE_4KB)
+@@ -1020,7 +1023,10 @@
+ #define TCR_TG1_GRANULE_4KB      (2ULL << TCR_TG1_GRANULE_SHIFT)
+ #define TCR_TG1_GRANULE_64KB     (3ULL << TCR_TG1_GRANULE_SHIFT)
+ 
+-#if __ARM_16K_PG__
++#if defined(BCM2837)
++/* Snapdragon 685 SM6225 Cortex-A73/A53 baseline: TGran16==0, hardware requires 4KB granule */
++#define TCR_TG1_GRANULE_SIZE     (TCR_TG1_GRANULE_4KB)
++#elif __ARM_16K_PG__
+ #define TCR_TG1_GRANULE_SIZE     (TCR_TG1_GRANULE_16KB)
+ #else
+ #define TCR_TG1_GRANULE_SIZE     (TCR_TG1_GRANULE_4KB)
+@@ -1876,7 +1882,9 @@
+ /*
+  * ARM Page Granule
+  */
+-#ifdef __ARM_16K_PG__
++#if defined(BCM2837)
++#define ARM_PGSHIFT 12
++#elif defined(__ARM_16K_PG__)
+ #define ARM_PGSHIFT 14
+ #else
+ #define ARM_PGSHIFT 12
+diff --git a/pexpert/pexpert/arm64/BCM2837.h b/pexpert/pexpert/arm64/BCM2837.h
+index 2c9ea3f..779318c 100644
+--- a/pexpert/pexpert/arm64/BCM2837.h
++++ b/pexpert/pexpert/arm64/BCM2837.h
+@@ -28,6 +28,16 @@
+ #define __ARM_DEBUG__             7
+ #define __ARM64_PMAP_SUBPAGE_L1__ 1
+ 
++/*
++ * Translation Granule: Snapdragon 685 SM6225 Cortex-A73/A53 baseline has TGran16 == 0.
++ * The hardware MMU uses 4KB translation granules (ARM_PGSHIFT = 12), while the Mach VM
++ * uses 16KB virtual pages (PAGE_SHIFT = 14) via Quad-PTE emulation (PAGE_RATIO = 4).
++ */
++#undef __ARM_16K_PG__
++#define ARM_PGSHIFT               12
++#define ARM_PGBYTES               (1 << ARM_PGSHIFT)
++#define ARM_PGMASK                (ARM_PGBYTES - 1)
++
+ /*
+  * Pointer authentication.  These cores are standard ARMv8.3+/ARMv9 ones, not Apple silicon: the
+  * signing instructions are the architectural ones and the key registers (APIAKey_EL1 and the rest)

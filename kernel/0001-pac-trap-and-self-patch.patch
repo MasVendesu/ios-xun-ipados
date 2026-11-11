@@ -1,0 +1,385 @@
+diff --git a/osfmk/arm64/pac_decode.h b/osfmk/arm64/pac_decode.h
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/osfmk/arm64/pac_decode.h
+@@ -0,0 +1,170 @@
++/*
++ * pac_decode.h  (HakiOS v2) - bo giai ma lenh PAC cho CPU ARMv8.0 (khong FEAT_PAuth)
++ *
++ * Header-only, freestanding (chi can <stdint.h>, <stdbool.h>) -> dung duoc trong EL1 handler.
++ *
++ * Quy uoc thiet ke: "khong bao gio ky con tro" => moi lenh pac-*, aut-*, xpac-* la identity.
++ *   pac-*, aut-*, xpac-* -> NOP                   (Xd giu nguyen)
++ *   retaa, retab         -> ret                   ; eretaa, eretab -> eret
++ *   braa, brab, blraa... -> br / blr Xn
++ *   pacga                -> mov Xd, xzr           (gia tri on dinh, khong phai rac)
++ *   ldraa, ldrab         -> ldr / ldur (1 lenh) neu encode duoc, nguoc lai PAC_EMULATE_LDRA
++ *   msr, mrs AP?Key?_EL1 -> nop / mov Xt, xzr
++ *
++ * CAC LENH HINT (paciasp, autiasp, pacibsp, xpaclri, pacia1716, bti...) KHONG BAO GIO TRAP
++ * tren v8.0 vi chung nam trong HINT space va chay nhu NOP -> khong can xu ly.
++ *
++ * Cach dung trong handler (EC==0x00):
++ *     pac_result_t r;
++ *     switch (pac_decode(insn, &r)) {
++ *     case PAC_PATCH:         self_patch(elr, r.new_insn); eret_retry; break;
++ *     case PAC_EMULATE_LDRA:  emulate_ldra(regs, &r); regs->pc += 4; break;
++ *     default: // khong phai PAC: chuyen cho luong SIGILL chuan
++ *     }
++ * LUU Y: neu lenh tai ELR da bi core khac va (khong con la UNDEFINED) thi handler phai
++ * eret de chay lai chu khong duoc coi la loi (xem tai lieu race SMP).
++ */
++#ifndef PAC_DECODE_H
++#define PAC_DECODE_H
++
++#include <stdint.h>
++#include <stdbool.h>
++
++#define A64_NOP        0xd503201fu
++#define A64_RET        0xd65f03c0u   /* ret (x30) */
++#define A64_ERET       0xd69f03e0u
++#define A64_BR_BASE    0xd61f0000u   /* | Rn << 5 */
++#define A64_BLR_BASE   0xd63f0000u   /* | Rn << 5 */
++#define A64_MOV_X_XZR  0xaa1f03e0u   /* | Rd      */
++#define A64_LDR_UIMM   0xf9400000u   /* ldr  Xt,[Xn,#imm12*8]  */
++#define A64_LDUR       0xf8400000u   /* ldur Xt,[Xn,#simm9]    */
++#define A64_LDR_PRE    0xf8400c00u   /* ldr  Xt,[Xn,#simm9]!   */
++
++typedef enum {
++    PAC_NOT_PAC = 0,        /* khong phai lenh PAC: de nguyen cho luong UNDEF chuan   */
++    PAC_PATCH,              /* thay bang r->new_insn (1 lenh, cung kich thuoc)        */
++    PAC_EMULATE_LDRA        /* ldraa/ldrab khong encode duoc 1 lenh: phai emulate     */
++} pac_action_t;
++
++typedef struct {
++    pac_action_t action;
++    uint32_t     new_insn;   /* hop le khi PAC_PATCH                              */
++    uint8_t      rt, rn;     /* hop le khi PAC_EMULATE_LDRA (31 = SP cho rn)      */
++    int16_t      off;        /*   byte offset da nhan 8                           */
++    bool         writeback;  /*   true neu pre-index (Xn += off truoc khi load)   */
++    const char  *name;       /* ten lenh goc (de log)                             */
++} pac_result_t;
++
++static inline pac_action_t pac__patch(pac_result_t *r, const char *nm, uint32_t w)
++{
++    r->action = PAC_PATCH; r->new_insn = w; r->name = nm;
++    return PAC_PATCH;
++}
++
++static inline pac_action_t pac_decode(uint32_t i, pac_result_t *r)
++{
++    static const char *const pac1_names[18] = {
++        "pacia", "pacib", "pacda", "pacdb", "autia", "autib", "autda", "autdb",
++        "paciza", "pacizb", "pacdza", "pacdzb", "autiza", "autizb", "autdza", "autdzb",
++        "xpaci", "xpacd"
++    };
++
++    r->action = PAC_NOT_PAC; r->new_insn = 0; r->rt = r->rn = 0;
++    r->off = 0; r->writeback = false; r->name = 0;
++
++    /* ---- 1. Lenh co dinh hoan toan ------------------------------------------------ */
++    switch (i) {
++    case 0xd65f0bffu: return pac__patch(r, "retaa",  A64_RET);
++    case 0xd65f0fffu: return pac__patch(r, "retab",  A64_RET);
++    case 0xd69f0bffu: return pac__patch(r, "eretaa", A64_ERET);
++    case 0xd69f0fffu: return pac__patch(r, "eretab", A64_ERET);
++    default: break;
++    }
++
++    /* ---- 2. BRAAZ/BRABZ/BLRAAZ/BLRABZ  (Rm phai = 11111, Rn bat ky) ---------------- */
++    switch (i & 0xfffffc1fu) {
++    case 0xd61f081fu: return pac__patch(r, "braaz",  A64_BR_BASE  | (i & 0x3e0u));
++    case 0xd61f0c1fu: return pac__patch(r, "brabz",  A64_BR_BASE  | (i & 0x3e0u));
++    case 0xd63f081fu: return pac__patch(r, "blraaz", A64_BLR_BASE | (i & 0x3e0u));
++    case 0xd63f0c1fu: return pac__patch(r, "blrabz", A64_BLR_BASE | (i & 0x3e0u));
++    default: break;
++    }
++
++    /* ---- 3. BRAA/BRAB/BLRAA/BLRAB (Rm = modifier, bo qua) -------------------------- */
++    switch (i & 0xfffffc00u) {
++    case 0xd71f0800u: return pac__patch(r, "braa",  A64_BR_BASE  | (i & 0x3e0u));
++    case 0xd71f0c00u: return pac__patch(r, "brab",  A64_BR_BASE  | (i & 0x3e0u));
++    case 0xd73f0800u: return pac__patch(r, "blraa", A64_BLR_BASE | (i & 0x3e0u));
++    case 0xd73f0c00u: return pac__patch(r, "blrab", A64_BLR_BASE | (i & 0x3e0u));
++    default: break;
++    }
++
++    /* ---- 4. Nhom data-processing 1-source PAC: 0xdac1xxxx -------------------------- */
++    if ((i & 0xffff0000u) == 0xdac10000u) {
++        unsigned opc = (i >> 10) & 0x3f, rn = (i >> 5) & 31;
++        if (opc < 8)                          /* pac/aut x {ia,ib,da,db}: Rn = modifier */
++            return pac__patch(r, pac1_names[opc], A64_NOP);
++        if (opc <= 17 && rn == 31)            /* 8..15: dang Z; 16/17: xpaci, xpacd -> Rn bat buoc = 31 */
++            return pac__patch(r, pac1_names[opc], A64_NOP);
++        return PAC_NOT_PAC;                   /* opcode khac / Rn sai = unallocated */
++    }
++
++    /* ---- 5. PACGA Xd, Xn, Xm|SP ----------------------------------------------------- */
++    if ((i & 0xffe0fc00u) == 0x9ac03000u)
++        return pac__patch(r, "pacga", A64_MOV_X_XZR | (i & 31u));
++
++    /* ---- 6. LDRAA / LDRAB (offset & pre-index) -------------------------------------- */
++    if ((i & 0xff200400u) == 0xf8200400u) {
++        unsigned m   = (i >> 23) & 1;
++        unsigned imm10 = ((i >> 22) & 1) << 9 | ((i >> 12) & 0x1ff);   /* S:imm9 */
++        int32_t  off = (int32_t)((imm10 ^ 0x200u) - 0x200u) * 8;         /* sext10 * 8 */
++        unsigned wb  = (i >> 11) & 1, rn = (i >> 5) & 31, rt = i & 31;
++        const char *nm = m ? "ldrab" : "ldraa";
++
++        if (!wb) {
++            if (off >= 0)                      /* 0..4088 luon vua imm12*8 */
++                return pac__patch(r, nm, A64_LDR_UIMM | ((uint32_t)(off >> 3) << 10) | rn << 5 | rt);
++            if (off >= -256)                   /* ldur: -256..-8 (boi so cua 8) */
++                return pac__patch(r, nm, A64_LDUR | (((uint32_t)off & 0x1ffu) << 12) | rn << 5 | rt);
++        } else {
++            if (off >= -256 && off <= 255)
++                return pac__patch(r, nm, A64_LDR_PRE | (((uint32_t)off & 0x1ffu) << 12) | rn << 5 | rt);
++        }
++        r->action = PAC_EMULATE_LDRA; r->name = nm;
++        r->rt = (uint8_t)rt; r->rn = (uint8_t)rn; r->off = (int16_t)off; r->writeback = wb;
++        return PAC_EMULATE_LDRA;
++    }
++
++    /* ---- 7. MSR/MRS khoa PAC: S3_0_C2_C{1..3}_op2 ------------------------------------ */
++    if ((i & 0xffdff000u) == 0xd5182000u) {
++        unsigned crm = (i >> 8) & 15, op2 = (i >> 5) & 7;
++        bool ok = ((crm == 1 || crm == 2) && op2 < 4) || (crm == 3 && op2 < 2);
++        if (ok) {
++            if ((i >> 21) & 1)  return pac__patch(r, "mrs APxKey", A64_MOV_X_XZR | (i & 31u));
++            else                return pac__patch(r, "msr APxKey", A64_NOP);
++        }
++    }
++
++    /* ---- 8. LDAPR / LDAPRB / LDAPRH (ARMv8.3-A RCpc) -> LDAR / LDARB / LDARH (ARMv8.0) ---- */
++    if ((i & 0x3ffffc00u) == 0x38bfc000u) {
++        unsigned sz = (i >> 30) & 3, rn = (i >> 5) & 31, rt = i & 31;
++        uint32_t ldar = ((uint32_t)sz << 30) | 0x08dffc00u | ((uint32_t)rn << 5) | (uint32_t)rt;
++        return pac__patch(r, "ldapr", ldar);
++    }
++
++    /* ---- 9. LDAPUR (ARMv8.4-A RCpc2) -> LDUR (ARMv8.0) ----------------------------------- */
++    if ((i & 0x3fc00c00u) == 0x19400000u) {
++        uint32_t ldur = (i & ~0x3fc00000u) | 0x38400000u;
++        return pac__patch(r, "ldapur", ldur);
++    }
++
++    /* ---- 10. STLUR (ARMv8.4-A RCpc2) -> STUR (ARMv8.0) ---------------------------------- */
++    if ((i & 0x3fc00c00u) == 0x19000000u) {
++        uint32_t stur = (i & ~0x3fc00000u) | 0x38000000u;
++        return pac__patch(r, "stlur", stur);
++    }
++
++    return PAC_NOT_PAC;
++}
++
++#endif /* PAC_DECODE_H */
+diff --git a/osfmk/arm64/pac_patch.c b/osfmk/arm64/pac_patch.c
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/osfmk/arm64/pac_patch.c
+@@ -0,0 +1,203 @@
++/*
++ * pac_patch.c - Runtime Trap-and-Self-Patch Engine for ARMv8.0 (No FEAT_PAuth)
++ * Part 1 Implementation for HakiOS / XNU-12377 on Snapdragon 685 (Cortex-A73/A53)
++ */
++
++#if defined(__clang__)
++#pragma clang attribute push (__attribute__((target("branch-protection=none"))), apply_to = function)
++#elif defined(__GNUC__)
++#pragma GCC target ("branch-protection=none")
++#endif
++
++#include <stdint.h>
++#include <stdbool.h>
++#include <stddef.h>
++
++#if defined(__has_include) && __has_include(<arm/thread.h>)
++#include <arm/thread.h>
++#include <mach/machine/thread_status.h>
++#include <kern/thread.h>
++#include <kern/task.h>
++#include <vm/vm_map.h>
++#include <libkern/copyio.h>
++#else
++typedef struct arm_saved_state arm_saved_state_t;
++typedef void *thread_t;
++typedef struct task { char pad[32]; struct vm_map *map; } *task_t;
++typedef struct vm_map { char pad[40]; void *pmap; } *vm_map_t;
++extern thread_t current_thread(void);
++extern task_t get_threadtask(thread_t th);
++extern uint64_t get_saved_state_reg(arm_saved_state_t *state, unsigned int reg);
++extern void set_saved_state_reg(arm_saved_state_t *state, unsigned int reg, uint64_t val);
++extern uint64_t get_saved_state_sp(arm_saved_state_t *state);
++extern void set_saved_state_sp(arm_saved_state_t *state, uint64_t sp);
++extern uint64_t get_saved_state_pc(arm_saved_state_t *state);
++extern void set_saved_state_pc(arm_saved_state_t *state, uint64_t pc);
++typedef uint64_t user_addr_t;
++typedef uint64_t vm_size_t;
++typedef uint64_t vm_offset_t;
++extern int copyin(const user_addr_t user_addr, void *kernel_addr, vm_size_t nbytes);
++#endif
++
++#include "pac_decode.h"
++
++extern unsigned long gVirtBase, gPhysBase;
++#define PHYSTOKV(pa) ((uint64_t)(pa) + (gVirtBase - gPhysBase))
++
++extern uint64_t kvtophys(vm_offset_t va);
++extern void loader_log_line(const char *line);
++
++/* Thống kê hiệu năng runtime */
++static uint64_t pac_patch_count = 0;
++static uint64_t pac_emul_count = 0;
++static uint64_t pac_smp_races = 0;
++
++/*
++ * Ghi đè mã máy tại Physical Address và đồng bộ Cache toàn bộ Core
++ */
++static void
++patch_memory_phys(uint64_t pa, uint64_t va, uint32_t new_insn)
++{
++	volatile uint32_t *p = (gVirtBase != 0) ? (volatile uint32_t *)PHYSTOKV(pa) : (volatile uint32_t *)va;
++	*p = new_insn;
++
++	uintptr_t p_va = (uintptr_t)p;
++	__asm__ volatile (
++		"dc cvau, %0 \n"
++		"dc cvau, %1 \n"
++		"dsb ish     \n"
++		"ic ivau, %1 \n"
++		"dsb ish     \n"
++		"isb         \n"
++		:: "r"(p_va), "r"(va) : "memory"
++	);
++}
++
++/*
++ * Xử lý lệnh LDRAA / LDRAB không encode được thành 1 lệnh duy nhất (Phải Emulate)
++ */
++static bool
++emulate_ldra(arm_saved_state_t *state, const pac_result_t *res, bool is_user)
++{
++	uint64_t base_addr = (res->rn == 31) ? 
++		(uint64_t)get_saved_state_sp(state) : 
++		(uint64_t)get_saved_state_reg(state, res->rn);
++
++	uint64_t target_addr = base_addr + (int64_t)res->off;
++	uint64_t loaded_val = 0;
++
++	if (is_user) {
++		if (copyin((user_addr_t)target_addr, &loaded_val, sizeof(loaded_val)) != 0) {
++			/* Lỗi truy cập bộ nhớ userland: trả về false để kernel xử lý */
++			return false;
++		}
++	} else {
++		loaded_val = *(volatile uint64_t *)target_addr;
++	}
++
++	/* Ghi giá trị đọc được vào thanh ghi đích Xt */
++	if (res->rt != 31) {
++		set_saved_state_reg(state, res->rt, loaded_val);
++	}
++
++	/* Nếu là chế độ pre-index writeback (Xn!): cập nhật lại thanh ghi cơ sở Xn */
++	if (res->writeback) {
++		if (res->rn == 31) {
++			set_saved_state_sp(state, target_addr);
++		} else {
++			set_saved_state_reg(state, res->rn, target_addr);
++		}
++	}
++
++	/* Tiến con trỏ lệnh PC qua lệnh LDRAA (4 bytes) */
++	uint64_t pc = (uint64_t)get_saved_state_pc(state);
++	set_saved_state_pc(state, pc + 4);
++	return true;
++}
++
++/*
++ * Main Entry Point: Được gọi từ sleh_synchronous khi gặp ESR_EC_UNCATEGORIZED (0x00)
++ * Trả về true: Đã xử lý / self-patched -> XNU chỉ cần return và eret để CPU chạy lại
++ * Trả về false: Không phải lệnh PAC -> XNU tiếp tục đẩy sang SIGILL (EXC_BAD_INSTRUCTION)
++ */
++bool
++pac_patch_handle_trap(arm_saved_state_t *state, bool is_user)
++{
++	uint64_t pc = (uint64_t)get_saved_state_pc(state);
++	uint32_t insn = 0;
++	uint64_t pa = 0;
++	void *pmap = NULL;
++
++	/* 1. Đọc mã lệnh insn 32-bit từ vị trí PC */
++	if (is_user) {
++		if (copyin((user_addr_t)pc, &insn, sizeof(insn)) != 0) {
++			return false;
++		}
++		uint64_t par, daif;
++		__asm__ volatile("mrs %0, daif\n msr daifset, #7\n at s1e0r, %1\n isb\n" : "=&r"(daif) : "r"(pc) : "memory");
++		__asm__ volatile("mrs %0, par_el1\n msr daif, %1\n" : "=r"(par) : "r"(daif));
++		if (par & 1ULL) return false;
++		pa = (par & 0x0000FFFFFFFFF000ULL) | (pc & 0xFFFULL);
++	} else {
++		insn = *(volatile uint32_t *)pc;
++		pa = (gVirtBase != 0) ? kvtophys(pc) : pc;
++		if (!pa) {
++			uint64_t par, daif;
++			__asm__ volatile("mrs %0, daif\n msr daifset, #7\n at s1e1r, %1\n isb\n" : "=&r"(daif) : "r"(pc) : "memory");
++			__asm__ volatile("mrs %0, par_el1\n msr daif, %1\n" : "=r"(par) : "r"(daif));
++			if (!(par & 1ULL)) {
++				pa = (par & 0x0000FFFFFFFFF000ULL) | (pc & 0xFFFULL);
++			}
++		}
++	}
++
++	if (!pa) return false;
++
++	/*
++	 * 2. SMP RACE DEFENSE:
++	 * Nếu core khác vừa vá xong lệnh này tại RAM, opcode đọc được tại thời điểm này
++	 * đã không còn là lệnh PAC / RCpc nữa. Ta coi như đã xử lý và quay về để CPU nạp lại!
++	 */
++	if (insn == A64_NOP || insn == A64_RET || insn == A64_ERET || 
++	    (insn & 0xfffffc1fu) == A64_BR_BASE || (insn & 0xfffffc1fu) == A64_BLR_BASE ||
++	    (insn & 0xffffffe0u) == A64_MOV_X_XZR ||
++	    (insn & 0xffc00000u) == A64_LDR_UIMM ||
++	    (insn & 0xffe00000u) == 0xf8400000u ||
++	    (insn & 0x3ffffc00u) == 0x08dffc00u || /* LDAR (ARMv8.0) */
++	    (insn & 0x3fc00c00u) == 0x38400000u || /* LDUR (ARMv8.0) */
++	    (insn & 0x3fc00c00u) == 0x38000000u) { /* STUR (ARMv8.0) */
++		pac_smp_races++;
++		return true;
++	}
++
++	/* 3. Giải mã qua bộ PAC Decoder thuần ARM ARM */
++	pac_result_t res;
++	pac_action_t act = pac_decode(insn, &res);
++
++	switch (act) {
++	case PAC_PATCH:
++		/* Ghi đè mã máy tại RAM qua Physical Mapping */
++		patch_memory_phys(pa, pc, res.new_insn);
++		pac_patch_count++;
++		/*
++		 * KHÔNG tăng PC: CPU khi eret sẽ thực thi lại chính địa chỉ PC này,
++		 * nhưng lúc này lệnh đã trở thành NOP, RET, BLR, LDR... gốc ARMv8.0!
++		 */
++		return true;
++
++	case PAC_EMULATE_LDRA:
++		if (!emulate_ldra(state, &res, is_user)) {
++			return false;
++		}
++		pac_emul_count++;
++		return true;
++
++	case PAC_NOT_PAC:
++	default:
++		return false;
++	}
++}
++
++#if defined(__clang__)
++#pragma clang attribute pop
++#endif
