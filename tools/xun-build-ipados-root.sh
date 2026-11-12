@@ -31,10 +31,35 @@ done
 grep -q hfsplus /proc/filesystems || { echo "kernel has no hfsplus" >&2; exit 2; }
 
 mkdir -p "$work/os" "$work/sys" "$work/app"
-ipsw mount fs  --device iPad8,1 --mount-point "$work/os"  "$ipsw" 2>/dev/null || ipsw mount fs  --mount-point "$work/os"  "$ipsw"
-mounts+=("$work/os")
-ipsw mount sys --device iPad8,1 --mount-point "$work/sys" "$ipsw" 2>/dev/null || ipsw mount sys --mount-point "$work/sys" "$ipsw"
-mounts+=("$work/sys")
+
+# AEA decryption fails now and then with a bad segment HMAC (the key comes from the
+# WKMS per request); a second or third attempt gets through.
+mount_retry() {
+	local what=$1 at=$2 i pid
+	# ipsw does not always return after a successful mount, so it runs in the
+	# background and success is judged by the mount point filling up.
+	for i in 1 2 3 4 5; do
+		ipsw mount "$what" --device iPad8,1 --mount-point "$at" "$ipsw" >/dev/null 2>&1 &
+		pid=$!
+		for _ in $(seq 1 900); do
+			if [ -n "$(ls -A "$at" 2>/dev/null)" ]; then
+				mounts+=("$at")
+				return 0
+			fi
+			kill -0 $pid 2>/dev/null || break
+			sleep 1
+		done
+		kill $pid 2>/dev/null || true
+		echo "  mount $what attempt $i failed, retrying" >&2
+		rm -rf /tmp/090-* 2>/dev/null || true
+		sleep 3
+	done
+	echo "could not mount $what from the IPSW" >&2
+	return 1
+}
+
+mount_retry fs  "$work/os"
+mount_retry sys "$work/sys"
 # AppOS is a plain DMG inside the IPSW; the OS .dmg is already extracted by ipsw
 app_dmg=$(python3 - "$ipsw" <<'PY'
 import plistlib, sys, zipfile
