@@ -53,22 +53,39 @@ gh run download <run-id> -R <akun>/ios26-xun -n ios26-xun -D out
 Artefak: `enxerto-boot.img` (root eMMC), `enxerto-boot-md0.img` (root RAM,
 smoke test), `mach.development.bcm2837`, `xun.adt`.
 
+Build lokal (Linux, tanpa CI) — sudah terbukti di sini:
+
+```bash
+bash kernel/apply.sh            # ke tree XNU; lihat build.sh untuk langkah penuh
+bash base/xnu-build.sh -j4 -k   # menghasilkan mach.development.bcm2837
+tools/xun-mkboot.sh out/mach.development.bcm2837 out/enxerto-boot.img
+tools/xun-mkboot.sh out/mach.development.bcm2837 out/enxerto-boot-md0.img --md0
+```
+
 ## Pasang
 
 1. Buka bootloader: `adb reboot bootloader`
 2. Cek kernel dulu tanpa menyentuh penyimpanan:
    `fastboot boot out/enxerto-boot-md0.img`
-3. Siapkan image root iPadOS (lihat `docs/ROOT_IMAGE.md`), lalu:
-   `fastboot flash -S 512M userdata out/userdata.simg`
-4. Boot: `fastboot boot out/enxerto-boot.img`
+3. Siapkan image root iPadOS di PC (lihat `docs/ROOT_IMAGE.md`):
+   `sudo tools/xun-build-ipados-root.sh iPad8,1_26.0_23A341_Restore.ipsw out/userdata.simg`
+4. Flash: `fastboot flash -S 512M userdata out/userdata.simg`
+5. Boot: `fastboot boot out/enxerto-boot.img`
 
 `userdata` Android akan terhapus. Partisi boot/recovery/modem/persist tidak
 disentuh.
 
 ## Keadaan jujur
 
-- Driver eMMC **belum diuji di perangkat keras** (belum ada pad yang tersambung
-  ke sesi ini). Yang sudah: kompilasi bersih, jalur baca/tulis melalui SDHCI PIO,
-  batas tulis dikunci ke satu partisi, cache di-flush sebelum/sesudah transfer.
+- **Kernel sudah dibangun dan ditautkan** dari tree bersih (arm64e Mach-O,
+  19,4 MB), dan driver eMMC serta HFS terbukti ada di dalamnya.
+- **Belum diuji di perangkat keras**: tidak ada pad yang tersambung ke sesi ini.
+  Yang sudah: kompilasi bersih tanpa error, verifikasi marker kernel, jalur
+  baca/tulis SDHCI PIO, batas tulis dikunci ke satu partisi, cache
+  di-flush sebelum/sesudah transfer.
 - Belum ada: sentuh, brightness, baterai, GPU, Wi-Fi/Bluetooth, audio.
-- Root image dibuat dari IPSW iPad (iPad8,1) — lihat `docs/ROOT_IMAGE.md`.
+- Root image butuh IPSW iPad8,1 26.0 (23A341); OS dan SystemOS di dalamnya
+  berformat AEA dan harus dimount lewat `ipsw mount`. Lihat
+  `docs/ROOT_IMAGE.md`.
+- CI GitHub Actions repo ini sedang terblokir (akun terkunci karena masalah
+  billing), jadi artefak dibuat dari build lokal.
