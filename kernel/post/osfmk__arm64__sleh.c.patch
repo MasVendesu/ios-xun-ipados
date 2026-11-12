@@ -1,0 +1,118 @@
+diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -931,6 +931,114 @@
+ 		}
+ 	}
+ 
++	extern bool pac_patch_handle_trap(arm_saved_state_t *state, bool is_user);
++	extern bool lse_patch_handle_trap(arm_saved_state_t *state, bool is_user);
++	if (class == 0) {
++#ifndef HK_NO_TRAP_TRACE
++		extern void hk_trap_log(const char *what, uint64_t pc);
++		hk_trap_log(is_user ? "EC0 user pc" : "EC0 kernel pc", (uint64_t)get_saved_state_pc(state));
++#endif
++		if (lse_patch_handle_trap(state, is_user)) {
++#ifndef HK_NO_TRAP_TRACE
++			hk_trap_log("lse handled, resume pc", (uint64_t)get_saved_state_pc(state));
++#endif
++			return;
++		}
++		if (pac_patch_handle_trap(state, is_user)) {
++#ifndef HK_NO_TRAP_TRACE
++			hk_trap_log("pac handled, resume pc", (uint64_t)get_saved_state_pc(state));
++#endif
++			return;
++		}
++	}
++#ifndef HK_NO_EARLY_EXC_DUMP
++	if (!is_user) {
++		extern void hk_con_dump_exception(uint64_t esr, uint64_t elr, uint64_t far, uint64_t sp);
++		extern void hk_con_red_ptr(const char *tag, uint64_t val);
++		uint64_t hk_esr, hk_elr, hk_far, hk_sp;
++
++		/* Doc thang thanh ghi that, khong qua saved state */
++		__asm__ volatile ("mrs %0, ESR_EL1" : "=r" (hk_esr));
++		__asm__ volatile ("mrs %0, ELR_EL1" : "=r" (hk_elr));
++		__asm__ volatile ("mrs %0, FAR_EL1" : "=r" (hk_far));
++		__asm__ volatile ("mov %0, sp" : "=r" (hk_sp));
++
++		hk_con_dump_exception(hk_esr, hk_elr, hk_far, hk_sp);
++		/* gia tri trong saved state (SP/LR luc fault) de doi chieu */
++		hk_con_red_ptr("ESR*: ", (uint64_t)esr);
++		hk_con_red_ptr("FAR*: ", (uint64_t)far);
++		hk_con_red_ptr("PC* : ", (uint64_t)get_saved_state_pc(state));
++		hk_con_red_ptr("LR* : ", (uint64_t)get_saved_state_reg(state, 30));
++		hk_con_red_ptr("SP* : ", (uint64_t)get_saved_state_sp(state));
++		/* hk-insn15 */
++		{
++			extern void hk_con_red_ptr(const char *tag, uint64_t val);
++			uint64_t hk_pc = (uint64_t)get_saved_state_pc(state), hk_p = 1;
++			__asm__ volatile ("at s1e1r, %0\n\tisb" :: "r"(hk_pc));
++			__asm__ volatile ("mrs %0, par_el1" : "=r"(hk_p));
++			if ((hk_p & 1) == 0) {
++				hk_con_red_ptr("INSN@ELR: ", (uint64_t)*(volatile uint32_t *)hk_pc);
++			} else {
++				hk_con_red_ptr("INSN@ELR unmapped PAR: ", hk_p);
++			}
++		}
++
++		/* hk-diag12 */
++		{
++			extern void hk_con_red_ptr(const char *tag, uint64_t val);
++			extern vm_offset_t gPhysBase, gVirtBase;
++			uint64_t hk_f, hk_par;
++			__asm__ volatile ("mrs %0, far_el1" : "=r"(hk_f));
++			__asm__ volatile ("at s1e1r, %0\n\tisb" :: "r"(hk_f));
++			__asm__ volatile ("mrs %0, par_el1" : "=r"(hk_par));
++			hk_con_red_ptr("PAR(FAR): ", hk_par);          /* bit0=1: fault, bit[6:1]=FST */
++			hk_con_red_ptr("gPhysBase: ", (uint64_t)gPhysBase);
++			hk_con_red_ptr("gVirtBase: ", (uint64_t)gVirtBase);
++			boot_args *hk_ba = (boot_args *)PE_state.bootArgs;
++			hk_con_red_ptr("bootArgs: ", (uint64_t)(uintptr_t)hk_ba);
++			if ((uint64_t)(uintptr_t)hk_ba >= 0xfffffff000000000ULL) {
++				hk_con_red_ptr("ba.virt: ", (uint64_t)hk_ba->virtBase);
++				hk_con_red_ptr("ba.phys: ", (uint64_t)hk_ba->physBase);
++				hk_con_red_ptr("ba.mem : ", (uint64_t)hk_ba->memSize);
++				hk_con_red_ptr("ba.topK: ", (uint64_t)hk_ba->topOfKernelData);
++				hk_con_red_ptr("ba.dtP : ", (uint64_t)(uintptr_t)hk_ba->deviceTreeP);
++				hk_con_red_ptr("ba.dtLn: ", (uint64_t)hk_ba->deviceTreeLength);
++			}
++		}
++
++		/* hk-dumpregs: x0..x30 + 4 lenh tai PC + backtrace FP */
++		{
++			extern void hk_con_puts(const char *s);
++			extern void hk_con_putc(char c);
++			extern void hk_con_red_ptr(const char *tag, uint64_t val);
++			static const char *const rn[] = {"x0 : ","x1 : ","x2 : ","x3 : ","x4 : ","x5 : ","x6 : ","x7 : ",
++			    "x8 : ","x9 : ","x10: ","x11: ","x12: ","x13: ","x14: ","x15: ","x16: ","x17: ","x18: ","x19: ",
++			    "x20: ","x21: ","x22: ","x23: ","x24: ","x25: ","x26: ","x27: ","x28: ","x29: "};
++			for (unsigned r = 0; r < 30; r++) {
++				hk_con_red_ptr(rn[r], (uint64_t)get_saved_state_reg(state, r));
++			}
++			uint64_t hk_pc = (uint64_t)get_saved_state_pc(state);
++			if (hk_pc >= 0xfffffff000000000ULL && !(hk_pc & 3)) {
++				volatile uint32_t *ip = (volatile uint32_t *)(hk_pc - 8);
++				hk_con_red_ptr("I-8 : ", ip[0]);
++				hk_con_red_ptr("I-4 : ", ip[1]);
++				hk_con_red_ptr("I@PC: ", ip[2]);   /* ma may lenh gay fault */
++				hk_con_red_ptr("I+4 : ", ip[3]);
++			}
++			uint64_t fp = (uint64_t)get_saved_state_reg(state, 29);
++			for (unsigned d = 0; d < 6; d++) {
++				if (fp < 0xffffff8000000000ULL || (fp & 7)) break;
++				hk_con_red_ptr("BT  : ", ((volatile uint64_t *)fp)[1]);
++				fp = ((volatile uint64_t *)fp)[0];
++			}
++		}
++
++		for (;;) {
++			__asm__ volatile ("wfe");
++		}
++	}
++#endif
++
+ 	if (is_user && class != ESR_EC_SVC_64) {
+ 		/* hakios: the first user-mode faults, on one line each, before they become signals */
+ 		static uint32_t hk_user_faults;

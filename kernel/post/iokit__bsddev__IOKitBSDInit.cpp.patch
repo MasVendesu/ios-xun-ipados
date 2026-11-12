@@ -1,0 +1,41 @@
+diff --git a/iokit/bsddev/IOKitBSDInit.cpp b/iokit/bsddev/IOKitBSDInit.cpp
+--- a/iokit/bsddev/IOKitBSDInit.cpp
++++ b/iokit/bsddev/IOKitBSDInit.cpp
+@@ -50,6 +50,9 @@
+ #include <vm/pmap.h>
+ #include <vm/vm_map.h>
+ #include <pexpert/pexpert.h>
++#if defined(__arm64__)
++#include <pexpert/arm64/board_config.h>
++#endif
+ #include <kern/clock.h>
+ #if CONFIG_KDP_INTERACTIVE_DEBUGGING
+ #include <kern/debug.h>
+@@ -824,6 +827,27 @@
+ 		}
+ 	}
+ 
++#if defined(ARM64_BOARD_CONFIG_BCM2837)
++	/*
++	 * rd=emmcroot0: the root on the pad's eMMC through this port's own polled SDHCI
++	 * driver (bsd/dev/xun_emmc.c). It resolves the partition named by emmcroot= from
++	 * the GPT and hands back a dev_t.
++	 */
++	if (rdBootVar[0] != 0) {
++		extern int xun_emmc_find_root(const char *rd, char *root_name, size_t name_sz, dev_t *root);
++		int emmc_error = xun_emmc_find_root(rdBootVar, rootName, rootNameSize, root);
++
++		if (emmc_error < 0) {
++			panic("IOFindBSDRoot: XUN emmc root %s unavailable: %d", rdBootVar, -emmc_error);
++		}
++		if (emmc_error > 0) {
++			IOLog("BSD root: %s, major %d, minor %d\n", rootName, major(*root), minor(*root));
++			*oflags = 0;
++			goto iofrootx;
++		}
++	}
++#endif /* ARM64_BOARD_CONFIG_BCM2837 */
++
+ //
+ //	Now check if we are trying to root on a memory device
+ //

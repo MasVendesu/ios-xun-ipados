@@ -8,13 +8,17 @@ case "$(basename "$0")" in *++) drv=clang++; extra=(-fno-use-cxa-atexit);; *) dr
 args=()
 for a in "$@"; do
   case "$a" in
-    -enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang) ;;
-    -fapple-kext-vtable-verify|-Wno-vla-cxx-extension) ;;
+    # clang 14 only takes the long Apple spelling; the =zero form is dropped
+    -ftrivial-auto-var-init=zero) args+=("-enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang");;
+    -fapple-kext-vtable-verify|-Wno-vla-cxx-extension|-mno-implicit-sme|-mimplicit-sme) ;;
     -Werror|-Werror=*|-Weverything|-pedantic-errors) ;;
     -fsanitize-ignorelist=*|-fsanitize-blacklist=*|-fsanitize-coverage-ignorelist=*|-fsanitize-system-ignorelist=*) ;;
     -fsanitize=*|-fno-sanitize=*|-fsanitize-trap=*|-fno-sanitize-recover=*|-fsanitize-minimal-runtime) ;;
     *) args+=("$a");;
   esac
 done
-exec /usr/bin/$drv -include "$HB/../../hostinc/xnu_clang_compat.h" -target ${XNU_ARCH:-arm64e}-apple-ios${XNU_SDK_VERSION:-26.0} --ld-path="$HB/ld64" \
+# The library builds (libpthread, libdispatch) come without the header search path of a
+# normal compile, so the compiler's own freestanding headers are added here.
+BINCLUDE=$(/usr/bin/$drv -print-resource-dir)/include
+exec /usr/bin/$drv -isystem "$BINCLUDE" ${XNU_SDK_PATH:+-isystem "$XNU_SDK_PATH/usr/include" -isystem "$XNU_SDK_PATH/usr/local/include"} ${XNU_OBJ_HDRS:+-isystem $XNU_OBJ_HDRS} ${STATIC_IF_PLAIN:+-DSTATIC_IF_PLAIN=1} ${XNU_NO_PAC:+-DNO_APPLE_PAC_BLOB_SIGN=1} -std=gnu2x -include "$HB/../../hostinc/xnu_clang_compat.h" -target ${XNU_ARCH:-arm64e}-apple-ios${XNU_SDK_VERSION:-26.0} --ld-path="$HB/ld64" \
   -w "${extra[@]}" "${args[@]}"

@@ -1,0 +1,171 @@
+diff --git a/bsd/miscfs/ramfs/ramfs.c b/bsd/miscfs/ramfs/ramfs.c
+--- a/bsd/miscfs/ramfs/ramfs.c
++++ b/bsd/miscfs/ramfs/ramfs.c
+@@ -22,8 +22,6 @@
+  * last unlink it is freed when its vnode is reclaimed.
+  */
+ 
+-#include <mach/mach_types.h>
+-#include <kern/zalloc.h>
+ #include <kern/assert.h>
+ #include <kern/kalloc.h>
+ #include <kern/locks.h>
+@@ -48,6 +46,7 @@
+ #include <uuid/uuid.h>
+ #include <vfs/vfs_support.h>
+ #include <vm/vm_kern.h>
++#include <vm/vm_kern_xnu.h>
+ 
+ #define RAMFS_MAX_NAME          255
+ #define RAMFS_MAX_XATTR         (16u * 1024 * 1024)
+@@ -199,16 +198,17 @@
+ static void *
+ ramfs_page_alloc(bool wait)
+ {
+-	(void)wait;
+-	return kalloc_data(PAGE_SIZE, Z_WAITOK | Z_ZERO);
++	vm_offset_t addr = 0;
++	kma_flags_t flags = KMA_KOBJECT | KMA_DATA | KMA_ZERO | (wait ? KMA_NONE : KMA_NOPAGEWAIT);
++
++	return kmem_alloc(kernel_map, &addr, PAGE_SIZE, flags, VM_KERN_MEMORY_FILE) == KERN_SUCCESS ?
++	       (void *)addr : NULL;
+ }
+ 
+ static void
+ ramfs_page_free(void *page)
+ {
+-	if (page) {
+-		kfree_data(page, PAGE_SIZE);
+-	}
++	kmem_free(kernel_map, (vm_offset_t)page, PAGE_SIZE);
+ }
+ 
+ /*
+@@ -934,6 +934,97 @@
+ 	return error;
+ }
+ 
++/*
++ * renamex_np(2): RENAME_SWAP exchanges two names, RENAME_EXCL refuses an existing target. iOS writes
++ * files "atomically" by swapping a new copy in -- usermanagerd's user sessions and persona manifest in
++ * /private/var/keybags among them, and with ENOTSUP here it never saved them and aborted at every start.
++ */
++static int
++ramfs_renamex(struct vnop_renamex_args *ap)
++{
++	struct vnop_rename_args plain = {
++		.a_desc = &vnop_rename_desc, .a_fdvp = ap->a_fdvp, .a_fvp = ap->a_fvp, .a_fcnp = ap->a_fcnp,
++		.a_tdvp = ap->a_tdvp, .a_tvp = ap->a_tvp, .a_tcnp = ap->a_tcnp, .a_context = ap->a_context,
++	};
++	struct ramfs_node *fdir = RAMFS_NODE(ap->a_fdvp);
++	struct ramfs_node *tdir = RAMFS_NODE(ap->a_tdvp);
++	struct ramfs_node *fnode, *tnode;
++	struct ramfs_mount *rm;
++	struct componentname *fcnp = ap->a_fcnp, *tcnp = ap->a_tcnp;
++	struct ramfs_dirent *fde, *tde;
++	int error = 0;
++
++	if (ap->a_flags & ~(VFS_RENAME_SWAP | VFS_RENAME_EXCL)) {
++		return ENOTSUP;
++	}
++	if (ap->a_flags == VFS_RENAME_EXCL) {
++		if (ap->a_tvp != NULLVP) {
++			return EEXIST;
++		}
++		return ramfs_rename(&plain);
++	}
++	if (ap->a_flags != VFS_RENAME_SWAP) {
++		return EINVAL;
++	}
++	if (ap->a_tvp == NULLVP) {
++		return ENOENT;
++	}
++	fnode = RAMFS_NODE(ap->a_fvp);
++	tnode = RAMFS_NODE(ap->a_tvp);
++	rm = fnode->rn_mount;
++	if (fnode == tnode) {
++		return 0;
++	}
++
++	lck_mtx_lock(&rm->rm_lock);
++	fde = ramfs_dir_find(fdir, fcnp->cn_nameptr, (size_t)fcnp->cn_namelen);
++	tde = ramfs_dir_find(tdir, tcnp->cn_nameptr, (size_t)tcnp->cn_namelen);
++	if (fde == NULL || fde->rd_node != fnode || tde == NULL || tde->rd_node != tnode) {
++		error = ENOENT;
++		goto out;
++	}
++	/* neither may end up inside itself */
++	for (struct ramfs_node *up = tdir; fnode->rn_type == VDIR && up != NULL; up = (up == rm->rm_root) ? NULL : up->rn_parent) {
++		if (up == fnode) {
++			error = EINVAL;
++			goto out;
++		}
++	}
++	for (struct ramfs_node *up = fdir; tnode->rn_type == VDIR && up != NULL; up = (up == rm->rm_root) ? NULL : up->rn_parent) {
++		if (up == tnode) {
++			error = EINVAL;
++			goto out;
++		}
++	}
++	fde->rd_node = tnode;
++	tde->rd_node = fnode;
++	if (fdir != tdir) {
++		if (fnode->rn_type == VDIR) {
++			fdir->rn_nlink--;
++			tdir->rn_nlink++;
++			fnode->rn_parent = tdir;
++		}
++		if (tnode->rn_type == VDIR) {
++			tdir->rn_nlink--;
++			fdir->rn_nlink++;
++			tnode->rn_parent = fdir;
++		}
++	}
++	ramfs_touch(fdir, true);
++	ramfs_touch(tdir, true);
++	ramfs_touch(fnode, false);
++	ramfs_touch(tnode, false);
++out:
++	lck_mtx_unlock(&rm->rm_lock);
++	if (!error) {
++		vnode_update_identity(ap->a_fvp, ap->a_tdvp, tcnp->cn_nameptr, tcnp->cn_namelen, tcnp->cn_hash,
++		    VNODE_UPDATE_PARENT | VNODE_UPDATE_NAME);
++		vnode_update_identity(ap->a_tvp, ap->a_fdvp, fcnp->cn_nameptr, fcnp->cn_namelen, fcnp->cn_hash,
++		    VNODE_UPDATE_PARENT | VNODE_UPDATE_NAME);
++	}
++	return error;
++}
++
+ static int
+ ramfs_open(__unused struct vnop_open_args *ap)
+ {
+@@ -1686,6 +1777,7 @@
+ 	{ .opve_op = &vnop_remove_desc, .opve_impl = (VOPFUNC)ramfs_remove },
+ 	{ .opve_op = &vnop_link_desc, .opve_impl = (VOPFUNC)ramfs_link },
+ 	{ .opve_op = &vnop_rename_desc, .opve_impl = (VOPFUNC)ramfs_rename },
++	{ .opve_op = &vnop_renamex_desc, .opve_impl = (VOPFUNC)ramfs_renamex },
+ 	{ .opve_op = &vnop_mkdir_desc, .opve_impl = (VOPFUNC)ramfs_mkdir },
+ 	{ .opve_op = &vnop_rmdir_desc, .opve_impl = (VOPFUNC)ramfs_rmdir },
+ 	{ .opve_op = &vnop_symlink_desc, .opve_impl = (VOPFUNC)ramfs_symlink },
+@@ -1880,7 +1972,9 @@
+ 		    VOL_CAP_INT_ADVLOCK |
+ 		    VOL_CAP_INT_FLOCK |
+ 		    VOL_CAP_INT_EXTENDED_SECURITY |
+-		    VOL_CAP_INT_EXTENDED_ATTR;
++		    VOL_CAP_INT_EXTENDED_ATTR |
++		    VOL_CAP_INT_RENAME_SWAP |
++		    VOL_CAP_INT_RENAME_EXCL;
+ 		cap->valid[VOL_CAPABILITIES_FORMAT] =
+ 		    VOL_CAP_FMT_PERSISTENTOBJECTIDS |
+ 		    VOL_CAP_FMT_SYMBOLICLINKS |
+@@ -1912,7 +2006,9 @@
+ 		    VOL_CAP_INT_USERACCESS |
+ 		    VOL_CAP_INT_MANLOCK |
+ 		    VOL_CAP_INT_EXTENDED_ATTR |
+-		    VOL_CAP_INT_NAMEDSTREAMS;
++		    VOL_CAP_INT_NAMEDSTREAMS |
++		    VOL_CAP_INT_RENAME_SWAP |
++		    VOL_CAP_INT_RENAME_EXCL;
+ 		VFSATTR_SET_SUPPORTED(fsap, f_capabilities);
+ 	}
+ 	/*

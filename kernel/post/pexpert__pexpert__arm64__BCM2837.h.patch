@@ -1,0 +1,20 @@
+diff --git a/pexpert/pexpert/arm64/BCM2837.h b/pexpert/pexpert/arm64/BCM2837.h
+--- a/pexpert/pexpert/arm64/BCM2837.h
++++ b/pexpert/pexpert/arm64/BCM2837.h
+@@ -29,6 +29,16 @@
+ #define __ARM64_PMAP_SUBPAGE_L1__ 1
+ 
+ /*
++ * Translation Granule: Snapdragon 685 SM6225 Cortex-A73/A53 baseline has TGran16 == 0.
++ * The hardware MMU uses 4KB translation granules (ARM_PGSHIFT = 12), while the Mach VM
++ * uses 16KB virtual pages (PAGE_SHIFT = 14) via Quad-PTE emulation (PAGE_RATIO = 4).
++ */
++#undef __ARM_16K_PG__
++#define ARM_PGSHIFT               12
++#define ARM_PGBYTES               (1 << ARM_PGSHIFT)
++#define ARM_PGMASK                (ARM_PGBYTES - 1)
++
++/*
+  * Pointer authentication.  These cores are standard ARMv8.3+/ARMv9 ones, not Apple silicon: the
+  * signing instructions are the architectural ones and the key registers (APIAKey_EL1 and the rest)
+  * are shared by EL0 and EL1, so the kernel has to program them and switch them at the EL0 boundary

@@ -1,0 +1,54 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -128,6 +128,50 @@
+ bsd/dev/redwood_battery.c	standard
+ bsd/dev/redwood_ufs.c	standard
+ bsd/dev/redwood_ufshc.c	standard
++bsd/dev/xun_emmc.c	standard
++
++# Apple OSS hfs-715.100.10, staged by kernel/hfs/stage-hfs.sh
++bsd/xun_hfs/core/BTree.c		optional xun_hfs
++bsd/xun_hfs/core/BTreeAllocate.c		optional xun_hfs
++bsd/xun_hfs/core/BTreeMiscOps.c		optional xun_hfs
++bsd/xun_hfs/core/BTreeNodeOps.c		optional xun_hfs
++bsd/xun_hfs/core/BTreeNodeReserve.c		optional xun_hfs
++bsd/xun_hfs/core/BTreeScanner.c		optional xun_hfs
++bsd/xun_hfs/core/BTreeTreeOps.c		optional xun_hfs
++bsd/xun_hfs/core/BTreeWrapper.c		optional xun_hfs
++bsd/xun_hfs/core/CatalogUtilities.c		optional xun_hfs
++bsd/xun_hfs/core/FileExtentMapping.c		optional xun_hfs
++bsd/xun_hfs/core/FileIDsServices.c		optional xun_hfs
++bsd/xun_hfs/core/MacOSStubs.c		optional xun_hfs
++bsd/xun_hfs/core/UnicodeWrappers.c		optional xun_hfs
++bsd/xun_hfs/core/VolumeAllocation.c		optional xun_hfs
++bsd/xun_hfs/core/hfs_attrlist.c		optional xun_hfs
++bsd/xun_hfs/core/hfs_btreeio.c		optional xun_hfs
++bsd/xun_hfs/core/hfs_catalog.c		optional xun_hfs
++bsd/xun_hfs/core/hfs_chash.c		optional xun_hfs
++bsd/xun_hfs/core/hfs_cnode.c		optional xun_hfs
++bsd/xun_hfs/core/hfs_cprotect.c		optional xun_hfs
++bsd/xun_hfs/core/hfs_endian.c		optional xun_hfs
++bsd/xun_hfs/core/hfs_extents.c		optional xun_hfs
++bsd/xun_hfs/core/hfs_fsinfo.c		optional xun_hfs
++bsd/xun_hfs/core/hfs_hotfiles.c		optional xun_hfs
++bsd/xun_hfs/core/hfs_journal.c		optional xun_hfs
++bsd/xun_hfs/core/hfs_link.c		optional xun_hfs
++bsd/xun_hfs/core/hfs_lookup.c		optional xun_hfs
++bsd/xun_hfs/core/hfs_notification.c		optional xun_hfs
++bsd/xun_hfs/core/hfs_quota.c		optional xun_hfs
++bsd/xun_hfs/core/hfs_readwrite.c		optional xun_hfs
++bsd/xun_hfs/core/hfs_resize.c		optional xun_hfs
++bsd/xun_hfs/core/hfs_search.c		optional xun_hfs
++bsd/xun_hfs/core/hfs_vfsops.c		optional xun_hfs
++bsd/xun_hfs/core/hfs_vfsutils.c		optional xun_hfs
++bsd/xun_hfs/core/hfs_vnops.c		optional xun_hfs
++bsd/xun_hfs/core/hfs_xattr.c		optional xun_hfs
++bsd/xun_hfs/core/rangelist.c		optional xun_hfs
++bsd/xun_hfs/hfs_encodings/hfs_encodinghint.c		optional xun_hfs
++bsd/xun_hfs/hfs_encodings/hfs_encodings.c		optional xun_hfs
++bsd/xun_hfs/xun_hfs_iokit.c		optional xun_hfs
++
+ bsd/dev/redwood_net.c	standard
+ bsd/dev/redwood_virtio_net.c	standard
+ bsd/dev/redwood_apple80211.c	standard

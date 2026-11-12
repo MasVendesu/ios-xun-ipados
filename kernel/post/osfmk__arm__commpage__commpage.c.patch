@@ -1,0 +1,23 @@
+diff --git a/osfmk/arm/commpage/commpage.c b/osfmk/arm/commpage/commpage.c
+--- a/osfmk/arm/commpage/commpage.c
++++ b/osfmk/arm/commpage/commpage.c
+@@ -683,12 +683,18 @@
+ static void
+ commpage_init_arm_optional_features_pfr2(__unused uint64_t *commpage_bits)
+ {
++	/*
++	 * ID_AA64PFR2_EL1 is newer than some assemblers know (stock clang 14 refuses it
++	 * at the backend). MTE_STORE_ONLY only matters where MTE exists at all, and no
++	 * board of this port has it, so the read is left out without the register.
++	 */
++#if defined(__apple_build_version__) || __clang_major__ >= 15
+ 	uint64_t pfr2 __unused = __builtin_arm_rsr64("ID_AA64PFR2_EL1");
+ 
+ 	if ((pfr2 & ID_AA64PFR2_EL1_MTE_STORE_ONLY_MASK) >= ID_AA64PFR2_EL1_MTE_STORE_ONLY_EN) {
+ 		gARM_FEAT_MTE_STORE_ONLY = 1;
+ 	}
+-
++#endif
+ }
+ 
+ /**

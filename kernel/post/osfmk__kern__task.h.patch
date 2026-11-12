@@ -1,0 +1,14 @@
+diff --git a/osfmk/kern/task.h b/osfmk/kern/task.h
+--- a/osfmk/kern/task.h
++++ b/osfmk/kern/task.h
+@@ -531,8 +531,9 @@
+ 
+ #if __has_feature(ptrauth_calls)
+ 	bool                            shared_region_auth_remapped;    /* authenticated sections ready for use */
+-	char                            *shared_region_id;              /* determines which ptr auth key to use */
+ #endif /* __has_feature(ptrauth_calls) */
++	/* Also used without ptrauth: arm64 machine_routines keys jop_pid on it. */
++	char                            *shared_region_id;              /* determines which ptr auth key to use */
+ 	struct vm_shared_region         *shared_region;
+ 
+ 	uint64_t rusage_cpu_interval;           /* Task-wide CPU limit interval */

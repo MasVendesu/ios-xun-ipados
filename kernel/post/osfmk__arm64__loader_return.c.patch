@@ -1,0 +1,619 @@
+diff --git a/osfmk/arm64/loader_return.c b/osfmk/arm64/loader_return.c
+--- a/osfmk/arm64/loader_return.c
++++ b/osfmk/arm64/loader_return.c
+@@ -17,6 +17,7 @@
+ #include <kern/debug.h>
+ #include <kern/startup.h>
+ #include <kern/thread_call.h>
++#include <kern/processor.h>
+ #include <kern/clock.h>
+ #include <arm/cpu_internal.h>
+ #include <arm/machine_routines.h>
+@@ -25,7 +26,7 @@
+ #include <pexpert/pexpert.h>
+ #include <pexpert/arm64/board_config.h>
+ #include <vm/vm_page.h>
+-/* #include <vm/vm_compressor.h> removed: panic/exception path must not depend on VM internals */
++#include <vm/vm_compressor_xnu.h>  /* xnu-12377 split */
+ 
+ /*
+  * The console log handed back to the loader. A long session writes more than fits, and both
+@@ -45,6 +46,7 @@
+ void loader_log_putc(char c);
+ void loader_return(void);
+ extern void redwood_adreno_quiesce(void);
++extern void hakios_dada_gpu_quiesce(void);
+ extern void redwood_adreno_stop(void);
+ extern void redwood_adreno_minute(void);
+ extern void redwood_wifi_stop(void);
+@@ -57,6 +59,7 @@
+ extern void redwood_camera_quiesce(void);
+ extern void redwood_mic_quiesce(void);
+ extern void redwood_ufs_quiesce(void);
++extern void redwood_ufs_close(void);
+ extern void redwood_var_save_on_return(void);   /* bsd/dev/redwood_ufs.c: the data volume into the flash */
+ void loader_checkpoint(uint64_t n);
+ 
+@@ -84,6 +87,147 @@
+ 
+ static void loader_log_put_locked(char c);
+ 
++/*
++ * Lines worth keeping whatever the ring loses: a driver's or a library's of ours being brought up
++ * ("dtouch: ", "dgpu: ", "redwood26: ", "exec: ") are copied here as they pass, and appended to the log on
++ * the way out (the stock daemons' chatter can push them out of the ring in a minute).
++ */
++#define LOADER_KEEP_SIZE (96 * 1024)
++static char     loader_keep[LOADER_KEEP_SIZE];
++static uint32_t loader_keep_len;
++static char     loader_keep_line[512];
++static uint32_t loader_keep_line_len;
++static volatile bool loader_keep_replaying;
++
++static bool
++loader_keep_wanted(const char *line)
++{
++	static const char *const prefixes[] = { "dtouch: ", "dgpu: ", "redwood26: ", "exec: ", "hakios: crash ", "hakios:   x0 ",
++		"hakios:   frame " };
++	static unsigned dyld_lines;
++
++	/* boot-arg keep_words="a,b": any line containing one of them (e.g. the wallpaper's: keep_words=oster,allpaper) */
++	{
++		static char words[128];
++		static int known;
++
++		if (!known) {
++			known = 1;
++			if (!PE_parse_boot_arg_str("keep_words", words, sizeof(words))) {
++				words[0] = 0;
++			}
++		}
++		for (const char *w = words; *w != 0;) {
++			const char *end = w;
++			size_t n;
++
++			while (*end != 0 && *end != ',') {
++				end++;
++			}
++			n = (size_t)(end - w);
++			for (const char *l = line; n != 0 && *l != 0; l++) {
++				if (strncmp(l, w, n) == 0) {
++					return true;
++				}
++			}
++			w = *end == ',' ? end + 1 : end;
++		}
++	}
++	/* launchd on SpringBoard or backboardd going away: why (the respring the user sees as a log out) */
++	{
++		bool exited = false, ours = false;
++
++		for (const char *l = line; *l != 0; l++) {
++			exited |= l[0] == 'e' && l[1] == 'x' && l[2] == 'i' && l[3] == 't' && l[4] == 'e' && l[5] == 'd' && l[6] == ' ';
++			ours |= (l[0] == 'S' && l[1] == 'p' && l[2] == 'r' && l[3] == 'i' && l[4] == 'n' && l[5] == 'g' && l[6] == 'B') ||
++			    (l[0] == 'b' && l[1] == 'a' && l[2] == 'c' && l[3] == 'k' && l[4] == 'b' && l[5] == 'o' && l[6] == 'a');
++		}
++		if (exited && ours) {
++			return true;
++		}
++		/* ... and what either says when it gives up: an assertion, an exception, an abort */
++		if (ours) {
++			static const char *const words[] = { "Assertion failed", "uncaught exception", "Terminating app",
++				"RBSTerminateContext", "watchdog", "Watchdog", "8badf00d", "Fatal error", "BUG IN CLIENT",
++				"abort() called", "exit reason" };
++
++			for (unsigned w = 0; w < sizeof(words) / sizeof(words[0]); w++) {
++				for (const char *l = line; *l != 0; l++) {
++					const char *a = l, *b = words[w];
++
++					while (*b != 0 && *a == *b) {
++						a++;
++						b++;
++					}
++					if (*b == 0) {
++						return true;
++					}
++				}
++			}
++		}
++		/* ... and what either says when it gives up: an assertion, an exception, an abort */
++		if (ours) {
++			static const char *const words[] = { "ssert", "xception", "erminat", "atal", "bort", "BUG IN", "rash" };
++
++			for (unsigned w = 0; w < sizeof(words) / sizeof(words[0]); w++) {
++				for (const char *l = line; *l != 0; l++) {
++					const char *a = l, *b = words[w];
++
++					while (*b != 0 && *a == *b) {
++						a++;
++						b++;
++					}
++					if (*b == 0) {
++						return true;
++					}
++				}
++			}
++		}
++	}
++
++	/* dyld's own lines (DYLD_PRINT_LIBRARIES, inject_print=1): the first few, and any about our library */
++	if (line[0] == 'd' && line[1] == 'y' && line[2] == 'l' && line[3] == 'd' && line[4] == '[') {
++		for (const char *l = line; *l != 0; l++) {
++			if (l[0] == 'r' && l[1] == 'e' && l[2] == 'd' && l[3] == 'w' && l[4] == 'o' && l[5] == 'o' && l[6] == 'd') {
++				return true;
++			}
++		}
++		return dyld_lines++ < 6;
++	}
++
++	for (unsigned i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++) {
++		const char *p = prefixes[i], *l = line;
++
++		while (*p != 0 && *p == *l) {
++			p++;
++			l++;
++		}
++		if (*p == 0) {
++			return true;
++		}
++	}
++	return false;
++}
++
++/* (under the log's lock) one more character of the line being written */
++static void
++loader_keep_char(char c)
++{
++	if (c != '\n') {
++		if (loader_keep_line_len < sizeof(loader_keep_line) - 2) {
++			loader_keep_line[loader_keep_line_len++] = c;
++		}
++		return;
++	}
++	loader_keep_line[loader_keep_line_len] = 0;
++	if (loader_keep_wanted(loader_keep_line) && loader_keep_len + loader_keep_line_len + 1 < LOADER_KEEP_SIZE) {
++		__builtin_memcpy(loader_keep + loader_keep_len, loader_keep_line, loader_keep_line_len);
++		loader_keep_len += loader_keep_line_len;
++		loader_keep[loader_keep_len++] = '\n';
++	}
++	loader_keep_line_len = 0;
++}
++
+ void
+ loader_log_putc(char c)
+ {
+@@ -136,6 +280,9 @@
+ static void
+ loader_log_put_locked(char c)
+ {
++	if (!loader_log_linear && !loader_keep_replaying) {
++		loader_keep_char(c);
++	}
+ 	if (loader_log_linear || loader_log_len < LOADER_LOG_HEAD) {
+ 		if (loader_log_len < LOADER_LOG_SIZE) {
+ 			loader_log[loader_log_len++] = c;
+@@ -198,6 +345,7 @@
+ 	volatile uint64_t stop;         /* the loader's to write: the host has asked for the run to end */
+ 	uint64_t magic2;                /* "XNULIVE2": what follows is there (a loader may meet an older kernel) */
+ 	const uint64_t *sound;          /* loader_sound: the same for a recording of the sound */
++	volatile uint64_t crumb;        /* the last loader_checkpoint(n) passed, for a watching loader */
+ };
+ 
+ /*
+@@ -361,6 +509,64 @@
+ void
+ loader_return(void)
+ {
++	extern void hk_draw_band(uint32_t color, uint32_t row_start, uint32_t row_count);
++	hk_draw_band(0x00FF8C00, 220, 10); /* Dark Orange band: loader_return / panic */
++
++	/* hakios: on-screen panic dump directly to display BEFORE any quiesce */
++	{
++		extern void hk_render_screen_asm(const char *str, uint32_t len, const unsigned char *font);
++		extern const unsigned char iso_font[];
++		extern char *debug_buf_base, *debug_buf_ptr;
++		extern const char *debugger_panic_str;
++		extern char loader_log[];
++		extern uint32_t loader_log_len;
++		static char panic_onscreen[3500];
++		uint32_t n = 0;
++		const char header[] = "=== HAKIOS PANIC CONSOLE ===\n";
++		for (const char *h = header; *h && n < 100; h++) {
++			panic_onscreen[n++] = *h;
++		}
++
++		if (debug_buf_base != NULL && debug_buf_ptr > debug_buf_base) {
++			const char *p = debug_buf_base;
++			while (p < debug_buf_ptr && n < 3400) {
++				panic_onscreen[n++] = *p++;
++			}
++		} else if (debugger_panic_str != NULL) {
++			const char *p = debugger_panic_str;
++			while (*p && n < 3400) {
++				panic_onscreen[n++] = *p++;
++			}
++		} else if (loader_log_len > 0) {
++			uint32_t start = (loader_log_len > 3000) ? (loader_log_len - 3000) : 0;
++			while (start < loader_log_len && n < 3400) {
++				panic_onscreen[n++] = loader_log[start++];
++			}
++		} else {
++			const char *msg = "loader_return() entered, but log buffers empty.\n";
++			while (*msg && n < 3400) {
++				panic_onscreen[n++] = *msg++;
++			}
++		}
++
++		panic_onscreen[n] = '\0';
++
++		/* Clean data cache to DRAM before MMU-off read */
++		for (uintptr_t p = (uintptr_t)panic_onscreen; p < (uintptr_t)panic_onscreen + n + 64; p += 64) {
++			__asm__ volatile ("dc civac, %0" : : "r" (p));
++		}
++		__asm__ volatile ("dsb sy");
++
++		hk_render_screen_asm(panic_onscreen, n, iso_font);
++		hk_draw_band(0x0000FF00, 230, 10); /* Lime band: screen dump completed successfully */
++
++		/* Spin forever so screen remains visible */
++		for (;;) {
++			__asm__ volatile ("wfe");
++		}
++	}
++
++	redwood_ufs_close();             /* no read of the storage in flight from here on */
+ #if defined(GENERIC_PSCI_SMP)
+ 	/*
+ 	 * With more than one processor: the others switch themselves off first, and the rest of
+@@ -371,6 +577,7 @@
+ #endif
+ 	redwood_ufs_quiesce();          /* this kernel's requests to the storage done, UEFI's list as it was, for the log */
+ 	redwood_adreno_quiesce();       /* the GPU block, if it was started, has tables in memory that is about to be reused */
++	hakios_dada_gpu_quiesce();     /* (dada's) */
+ 	redwood_wifi_quiesce();         /* the Wi-Fi DSP, if it still runs (a panic), is not left to itself */
+ 	redwood_adsp_quiesce();         /* nor the audio DSP */
+ 	redwood_ddr_quiesce();          /* and the vote for the memory's bandwidth taken away */
+@@ -384,6 +591,12 @@
+ 	 * never happens. Append the buffer so the loader gets it either way.
+ 	 */
+ 	loader_log_linearize();
++	if (!loader_return_entered && loader_keep_len != 0) {
++		loader_log_puts("\n--- kept lines (dtouch, redwood26, exec) ---\n");
++		for (uint32_t i = 0; i < loader_keep_len; i++) {
++			loader_log_putc(loader_keep[i]);
++		}
++	}
+ 	if (!loader_return_entered) {
+ 		loader_log_append_msgbuf();
+ 	}
+@@ -401,6 +614,8 @@
+ void
+ loader_checkpoint(uint64_t n)
+ {
++	loader_live.crumb = n;
++	__asm__ volatile ("dsb sy" ::: "memory");
+ 	if (loader_stub_slot[2] == n) {
+ 		loader_jump(2, n);
+ 	}
+@@ -425,6 +640,42 @@
+ 	loader_return();
+ }
+ 
++static void hk_stack_snapshot(void);
++
++/*
++ * The kept lines once more, into the ring this time: the host fetches the log only while the
++ * kernel runs, so what is appended on the way out never reaches it; 10 s before the end it does.
++ */
++static void
++loader_keep_replay(void)
++{
++	char line[200];
++	uint32_t at = 0, end = loader_keep_len;
++
++	loader_keep_replaying = true;
++	loader_log_line("\n--- kept lines (dtouch, redwood26, exec), again ---\n");
++	while (at < end) {
++		uint32_t n = 0;
++
++		while (at < end && loader_keep[at] != '\n' && n < sizeof(line) - 2) {
++			line[n++] = loader_keep[at++];
++		}
++		at++;
++		line[n++] = '\n';
++		line[n] = 0;
++		loader_log_line(line);
++	}
++	loader_log_line("--- end of kept lines ---\n");
++	loader_keep_replaying = false;
++}
++
++static void
++hk_stack_snapshot_call(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
++{
++	loader_keep_replay();
++	hk_stack_snapshot();
++}
++
+ static void
+ loader_return_timer(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
+ {
+@@ -435,12 +686,35 @@
+ 		loader_log_putc(*c);
+ 	}
+ 	PE_parse_boot_argn("return_panic", &as_panic, sizeof(as_panic));
++	/* the watched processes once more, as the run ends: what is written now reaches the host in the
++	 * log the loader stages after the return, and the one of ten seconds ago may have been pushed out
++	 * of the ring by then (a megabyte of the window server's lines in ten seconds) */
++	if (PE_parse_boot_arg_str("stacks", (char [8]){ 0 }, 8)) {
++		hk_stack_snapshot();
++	}
+ 	if (!as_panic) {
+ 		redwood_var_save_on_return();   /* the data volume kept, while the system is still whole */
+ 		redwood_adreno_stop();          /* a GPU kept for the system is given back while there is a thread to wait in */
+ 		redwood_wifi_stop();            /* and the Wi-Fi DSP, if it runs, shut down */
+ 		redwood_adsp_stop();            /* and the audio DSP */
+ 	}
++	/*
++	 * The return is the boot processor's to make (it is the core the loader gave the kernel; the others
++	 * are switched off first). A timer that fires on another core hands it over and waits: making the
++	 * hand-over itself (psci_smp_stop_others) from a secondary core died in a data abort on dada.
++	 */
++	{
++		int boot_cpu = master_processor->cpu_id;      /* (not master_cpu: that one is not set on this path) */
++
++		if (!PE_parse_boot_argn("return_cpu", &cpu, sizeof(cpu)) && cpu_number() != boot_cpu) {
++			cpu = (uint32_t)boot_cpu;
++			if (cpu_xcall((int)cpu, loader_return_test, (void *)(uintptr_t)(as_panic ? 2 : 1)) == KERN_SUCCESS) {
++				for (;;) {
++					delay_for_interval(1000, NSEC_PER_MSEC);
++				}
++			}
++		}
++	}
+ 	if (PE_parse_boot_argn("return_cpu", &cpu, sizeof(cpu)) && cpu <= (uint32_t)ml_get_max_cpu_number() &&
+ 	    cpu_xcall((int)cpu, loader_return_test, (void *)(uintptr_t)(as_panic ? 2 : 1)) == KERN_SUCCESS) {
+ 		for (;;) {
+@@ -463,6 +737,12 @@
+ 	thread_call_t call = thread_call_allocate(loader_return_timer, NULL);
+ 	clock_interval_to_deadline(seconds, NSEC_PER_SEC, &deadline);
+ 	thread_call_enter_delayed(call, deadline);
++	/* the snapshot of the watched processes ten seconds before: the host's last look at the live log has it */
++	if (seconds > 20) {
++		thread_call_t snap = thread_call_allocate(hk_stack_snapshot_call, NULL);
++		clock_interval_to_deadline(seconds - 10, NSEC_PER_SEC, &deadline);
++		thread_call_enter_delayed(snap, deadline);
++	}
+ }
+ STARTUP(EARLY_BOOT, STARTUP_RANK_LAST, loader_return_timer_init);
+ 
+@@ -543,7 +823,7 @@
+ 	    MB(vm_page_free_count), MB(vm_page_pageable_external_count), MB(vm_page_pageable_internal_count),
+ 	    MB(vm_page_wire_count), surfaces, (unsigned int)(surface_bytes >> 20),
+ 	    MB(os_atomic_load(&ramfs_pages_in_use, relaxed)),
+-	    0, 0,
++	    MB(VM_PAGE_COMPRESSOR_COUNT), MB(c_segment_pages_compressed),
+ 	    MB(memorystatus_available_pages),
+ 	    MB(memorystatus_available_pages_critical), MB(memorystatus_available_pages_critical_base));
+ #undef MB
+@@ -577,6 +857,10 @@
+ 	if (++loader_live.heartbeat % MEMORY_REPORT_BEATS == 0) {
+ 		memory_report();
+ 	}
++	if (loader_live.heartbeat == 1) {
++		extern void hk_ib_report(const char *where);
++		hk_ib_report("first heartbeat");
++	}
+ 
+ 	clock_interval_to_deadline(HV_WDT_PET_SECONDS, NSEC_PER_SEC, &deadline);
+ 	thread_call_enter_delayed(hv_wdt_call, deadline);
+@@ -592,12 +876,206 @@
+ }
+ STARTUP(EARLY_BOOT, STARTUP_RANK_LAST, hv_wdt_pet_init);
+ 
++/*
++ * hakios: a crash report in the loader's log. A process that dies of a signal that would dump core
++ * (SIGABRT, SIGSEGV, SIGBUS, SIGTRAP, SIGILL) leaves its registers and the return addresses of its
++ * frame chain here, with the shared cache's slide, so they can be named offline (ipsw dyld a2s); iOS's
++ * own crash reports need daemons that are not running yet. Called on the dying thread, from postsig.
++ */
++#include <kern/task.h>
++#include <arm/thread.h>
++#include <libkern/copyio.h>
++
++#define HK_USER_ADDR(a) ((a) & 0x0000007fffffffffULL)  /* without the pointer's signature */
++
+ void hk_crash_report(const char *name, int pid, int sig);
+ 
+ void
+ hk_crash_report(const char *name, int pid, int sig)
+ {
+-	(void)name;
+-	(void)pid;
+-	(void)sig;
++	thread_t thread = current_thread();
++	task_t task = current_task();
++	struct arm_saved_state *ss = find_user_regs(thread);
++	char line[200];
++	uint64_t fp, frame[2];
++
++	if (ss == NULL || !is_saved_state64(ss)) {
++		return;
++	}
++	snprintf(line, sizeof(line), "hakios: crash %s[%d] signal %d pc %llx lr %llx sp %llx far %llx esr %x slide %x\n",
++	    name, pid, sig, HK_USER_ADDR(get_saved_state_pc(ss)), HK_USER_ADDR(get_saved_state_lr(ss)),
++	    get_saved_state_sp(ss), get_saved_state_far(ss), get_saved_state_esr(ss), task->task_shared_region_slide);
++	loader_log_line(line);
++	snprintf(line, sizeof(line), "hakios:   x0 %llx x1 %llx x2 %llx x3 %llx x8 %llx x16 %llx\n",
++	    get_saved_state_reg(ss, 0), get_saved_state_reg(ss, 1), get_saved_state_reg(ss, 2),
++	    get_saved_state_reg(ss, 3), get_saved_state_reg(ss, 8), get_saved_state_reg(ss, 16));
++	loader_log_line(line);
++	fp = get_saved_state_fp(ss);
++	for (int i = 0; i < 24 && fp != 0 && (fp & 7) == 0; i++) {
++		if (copyin((user_addr_t)fp, frame, sizeof(frame)) != 0) {
++			break;
++		}
++		snprintf(line, sizeof(line), "hakios:   frame %d: %llx\n", i, HK_USER_ADDR(frame[1]));
++		loader_log_line(line);
++		if (frame[0] <= fp) {
++			break;
++		}
++		fp = frame[0];
++	}
++	/* and where this project's own libraries were loaded in it, for the frames that are in them
++	 * (dyld's all_image_infos: version, count, then the array of { load address, path, date }) */
++	if (task->all_image_info_addr != 0) {
++		uint32_t head[2];
++		uint64_t array = 0;
++
++		if (copyin((user_addr_t)task->all_image_info_addr, head, sizeof(head)) == 0 &&
++		    copyin((user_addr_t)task->all_image_info_addr + 8, &array, sizeof(array)) == 0) {
++			for (uint32_t i = 0; i < head[1] && i < 1024; i++) {
++				uint64_t info[3];
++				char path[96] = "";
++
++				if (copyin((user_addr_t)(array + 24 * i), info, sizeof(info)) != 0) {
++					break;
++				}
++				if (info[0] >= 0x180000000ull && info[0] < 0x300000000ull) {
++					continue;
++				}
++				size_t got = 0;
++
++				(void)copyinstr((user_addr_t)info[1], path, sizeof(path) - 1, &got);
++				path[sizeof(path) - 1] = '\0';
++				if (strnstr(path, "redwood", sizeof(path)) == NULL) {
++					continue;
++				}
++				snprintf(line, sizeof(line), "hakios:   frame image %llx %s\n", info[0], path);
++				loader_log_line(line);
++			}
++		}
++	}
++}
++
++/*
++ * hakios: where the threads of a few processes are when the run ends: each thread's user pc and lr
++ * and the return addresses of its frame chain (read from its own memory), with the shared cache's
++ * slide, for naming offline. Boot-arg stacks="name name ..." (p_comm, at most 16 characters each);
++ * by default the window server and the system shell.
++ */
++#include <kern/processor.h>
++#include <vm/vm_map_xnu.h>
++
++extern char *proc_name_address(void *p);
++extern void *get_bsdtask_info(task_t);
++
++static void
++hk_stack_snapshot(void)
++{
++	/*
++	 * Only references and registers are taken under the locks; the user memory (dyld's image
++	 * list, the frame chains) is read after they are let go of. Read under tasks_threads_lock,
++	 * a page of it that had to come from the phone's storage (the DSU root is read on demand)
++	 * stalled the snapshot -- most runs ended without one.
++	 */
++	enum { HK_TASKS = 4, HK_THREADS = 96 };
++	char wanted[128] = "backboardd SpringBoard";
++	char line[200];
++	task_t task, found[HK_TASKS];
++	unsigned nfound = 0;
++
++	PE_parse_boot_arg_str("stacks", wanted, sizeof(wanted));
++	lck_mtx_lock(&tasks_threads_lock);
++	queue_iterate(&tasks, task, task_t, tasks) {
++		void *p = get_bsdtask_info(task);
++		const char *name = p ? proc_name_address(p) : NULL;
++		size_t n;
++
++		if (name == NULL || (n = strlen(name)) == 0 || nfound == HK_TASKS) {
++			continue;
++		}
++		const char *w = wanted, *hit = NULL;
++		while ((w = strnstr(w, name, strlen(w))) != NULL) {
++			if ((w == wanted || w[-1] == ' ') && (w[n] == ' ' || w[n] == '\0')) {
++				hit = w;
++				break;
++			}
++			w += n;
++		}
++		if (hit != NULL) {
++			task_reference(task);
++			found[nfound++] = task;
++		}
++	}
++	lck_mtx_unlock(&tasks_threads_lock);
++
++	for (unsigned t = 0; t < nfound; t++) {
++		static struct { uint64_t id, pc, lr, fp; } regs[HK_THREADS];
++		unsigned nregs = 0;
++		thread_t thread;
++		void *p;
++
++		task = found[t];
++		p = get_bsdtask_info(task);
++		snprintf(line, sizeof(line), "hakios: stacks of %s (slide %x)\n", p ? proc_name_address(p) : "?",
++		    task->task_shared_region_slide);
++		loader_log_line(line);
++		task_lock(task);
++		queue_iterate(&task->threads, thread, thread_t, task_threads) {
++			struct arm_saved_state *ss = find_user_regs(thread);
++
++			if (ss == NULL || !is_saved_state64(ss) || nregs == HK_THREADS) {
++				continue;
++			}
++			regs[nregs].id = thread->thread_id;
++			regs[nregs].pc = get_saved_state_pc(ss);
++			regs[nregs].lr = get_saved_state_lr(ss);
++			regs[nregs].fp = get_saved_state_fp(ss);
++			nregs++;
++		}
++		task_unlock(task);
++		/* the images outside the shared cache, where they were loaded: dyld's all_image_infos
++		 * (version, count, then a pointer to the array of { load address, path, mod date }) */
++		if (task->all_image_info_addr != 0) {
++			uint32_t head[2];
++			uint64_t array = 0;
++
++			if (vm_map_read_user(task->map, task->all_image_info_addr, head, sizeof(head)) == KERN_SUCCESS &&
++			    vm_map_read_user(task->map, task->all_image_info_addr + 8, &array, sizeof(array)) == KERN_SUCCESS) {
++				for (uint32_t i = 0; i < head[1] && i < 1024; i++) {
++					uint64_t info[3];
++					char path[96] = "";
++
++					if (vm_map_read_user(task->map, array + 24 * i, info, sizeof(info)) != KERN_SUCCESS) {
++						break;
++					}
++					if (info[0] >= 0x180000000ull && info[0] < 0x300000000ull) {
++						continue;       /* in the shared cache */
++					}
++					(void)vm_map_read_user(task->map, info[1], path, sizeof(path) - 1);
++					path[sizeof(path) - 1] = '\0';
++					snprintf(line, sizeof(line), "hakios:   image %llx %s\n", info[0], path);
++					loader_log_line(line);
++				}
++			}
++		}
++		for (unsigned r = 0; r < nregs; r++) {
++			uint64_t fp = regs[r].fp, frame[2];
++			char chain[120];
++			size_t used = 0;
++
++			chain[0] = '\0';
++			for (int i = 0; i < 10 && fp != 0 && (fp & 7) == 0 && used < sizeof(chain) - 12; i++) {
++				if (vm_map_read_user(task->map, (vm_map_address_t)fp, frame, sizeof(frame)) != KERN_SUCCESS) {
++					break;
++				}
++				used += (size_t)snprintf(chain + used, sizeof(chain) - used, " %llx", HK_USER_ADDR(frame[1]));
++				if (frame[0] <= fp) {
++					break;
++				}
++				fp = frame[0];
++			}
++			snprintf(line, sizeof(line), "hakios:   thread %llx pc %llx lr %llx:%s\n", regs[r].id,
++			    HK_USER_ADDR(regs[r].pc), HK_USER_ADDR(regs[r].lr), chain);
++			loader_log_line(line);
++		}
++		task_deallocate(task);
++	}
+ }

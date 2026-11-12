@@ -1,0 +1,27 @@
+diff --git a/osfmk/machine/static_if.h b/osfmk/machine/static_if.h
+--- a/osfmk/machine/static_if.h
++++ b/osfmk/machine/static_if.h
+@@ -145,6 +145,15 @@
+ 	__result;                                               \
+ }))
+ 
++/*
++ * Stock (non-Apple) clang cannot jump out of this statement expression's asm goto
++ * from an enclosing `||` (mach_assert_enabled_expr) before clang 17, so with
++ * STATIC_IF_PLAIN the answer is simply the constant "TRUE". The key fixups the
++ * branch enables are a patch-time optimisation only.
++ */
++#ifdef STATIC_IF_PLAIN
++#define improbable_static_if(n)  (1)
++#else
+ #define improbable_static_if(n)  __improbable(({                \
+ 	__label__ __l;                                          \
+ 	int __result = 1;                                       \
+@@ -157,6 +166,7 @@
+ __l:                                                            \
+ 	__result;                                               \
+ }))
++#endif
+ 
+ 
+ /*!

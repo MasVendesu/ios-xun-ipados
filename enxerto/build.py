@@ -438,7 +438,9 @@ def main():
         toolchain["cc"]
     ] + cflags + [
         "-static", "-T", str(ld_script),
-        "-Wl,--build-id=none", "-Wl,--no-warn-rwx-segments", "-Wl,-N"
+        "-Wl,--build-id=none", "-Wl,-N"
+        # binutils before 2.39 has no --no-warn-rwx-segments; the warning is harmless
+        
     ] + [str(o) for o in objs] + [
         "-o", str(elf_path), "-lgcc"
     ]

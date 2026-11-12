@@ -1,0 +1,14 @@
+diff --git a/iokit/IOKit/IOMemoryDescriptor.h b/iokit/IOKit/IOMemoryDescriptor.h
+--- a/iokit/IOKit/IOMemoryDescriptor.h
++++ b/iokit/IOKit/IOMemoryDescriptor.h
+@@ -90,6 +90,10 @@
+  * IOOptionBits used in the withOptions variant
+  */
+ enum {
++	/* only in DriverKit/IOMemoryDescriptor.iig; the kernel side uses it, and the
++	 * generated header of this tree does not carry it yet */
++	kIOMemoryMapCacheModeRealTime = 0x00000800,
++
+ 	kIOMemoryDirectionMask      = 0x00000007,
+ #ifdef XNU_KERNEL_PRIVATE
+ 	kIOMemoryAutoPrepare        = 0x00000008,// Shared with Buffer MD

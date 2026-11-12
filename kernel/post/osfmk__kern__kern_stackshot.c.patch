@@ -1,0 +1,12 @@
+diff --git a/osfmk/kern/kern_stackshot.c b/osfmk/kern/kern_stackshot.c
+--- a/osfmk/kern/kern_stackshot.c
++++ b/osfmk/kern/kern_stackshot.c
+@@ -3935,7 +3935,7 @@
+ stackshot_record_device_lock_state(kcdata_descriptor_t kcd)
+ {
+ 	struct stackshot_device_lock_state state = {};
+-	stackshot_device_lock_flags_t flags = {};
++	stackshot_device_lock_flags_t flags = { 0 };
+ 	if (after_first_unlock) {
+ 		flags |= stackshot_device_after_first_unlock;
+ 	}

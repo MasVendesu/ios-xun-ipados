@@ -1,0 +1,18 @@
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -472,6 +472,14 @@
+ 			PAGE_SHIFT_CONST = ARM_PGSHIFT;
+ 		}
+ 
++#if defined(BCM2837)
++		/*
++		 * hakios on SM6225: always advertise 16KB VM page size for arm64e ABI compatibility.
++		 * Hardware 4KB translation granule uses Quad-PTE emulation.
++		 */
++		PAGE_SHIFT_CONST = PAGE_MAX_SHIFT;
++#endif
++
+ 		/* 32-bit apps always see 16KB page size */
+ 		page_shift_user32 = PAGE_MAX_SHIFT;
+ #ifdef  APPLETYPHOON

@@ -18,4 +18,4 @@ export RC_ProjectSourceVersion=${RC_ProjectSourceVersion:-12377.121.6}
 export RC_ProjectName=xnu
 # On macOS the cctools, mig, unifdef and csh come from Xcode and the system instead of theos and
 # sources built here; the scripts look at this to choose.
-[ "$(uname -s)" = Darwin ] && export XNU_HOST_DARWIN=1
+if [ "$(uname -s)" = Darwin ]; then export XNU_HOST_DARWIN=1; fi  # a bare && would end a `set -e` caller

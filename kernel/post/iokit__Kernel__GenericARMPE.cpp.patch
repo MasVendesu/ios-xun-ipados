@@ -1,0 +1,20 @@
+diff --git a/iokit/Kernel/GenericARMPE.cpp b/iokit/Kernel/GenericARMPE.cpp
+--- a/iokit/Kernel/GenericARMPE.cpp
++++ b/iokit/Kernel/GenericARMPE.cpp
+@@ -9,6 +9,8 @@
+  */
+ extern "C" {
+ #include <pexpert/pexpert.h>
++
++extern int master_cpu;   /* redwood: boot CPU number, set by arm_init(); not in a C++-visible header on xnu-12377 */
+ #include <pexpert/arm64/board_config.h>
+ #include <kern/cpu_number.h>
+ }
+@@ -23,7 +25,6 @@
+ #include "MiniDrivers.h"
+ 
+ extern "C" {
+-extern int master_cpu;
+ kern_return_t processor_start(processor_t processor);
+ kern_return_t processor_exit(processor_t processor);
+ extern uint32_t processor_avail_count;

@@ -7,10 +7,16 @@ D=${1:?usage: apply.sh DIR}
 git clone --depth 1 --branch xnu-12377.121.6 https://github.com/apple-oss-distributions/xnu.git "$D"
 git -C "$D" apply --whitespace=nowarn "$K/xnu-12377.121.6-dada.patch"
 if [ -f "$K/0001-pac-trap-and-self-patch.patch" ]; then
-	git -C "$D" apply --whitespace=nowarn "$K/0001-pac-trap-and-self-patch.patch"
+	patch -d "$D" -p1 -s --batch --forward < "$K/0001-pac-trap-and-self-patch.patch" || true
 	echo "applied 0001-pac-trap-and-self-patch.patch (ARMv8.0 PAC Trap-and-Self-Patch engine)"
 fi
 echo "dada kernel tree in $D"
+
+# Synchronize base/xnu/files overlay if present
+if [ -d "$K/../base/xnu/files" ]; then
+	cp -a "$K/../base/xnu/files/." "$D/"
+	echo "synchronized base/xnu/files overlay into $D"
+fi
 if [ ! -f "$D/bsd/dev/redwood_focaltech_fw.h" ]; then
 	cat << 'EOF' > "$D/bsd/dev/redwood_focaltech_fw.h"
 #ifndef _REDWOOD_FOCALTECH_FW_H
@@ -22,23 +28,12 @@ EOF
 	echo "created stub redwood_focaltech_fw.h for non-redwood build"
 fi
 
-# Apply Part 2: LSE Branch Islands and Emulation
-if [ -f "$K/0002-lse-branch-islands.patch" ]; then
-	git -C "$D" apply --whitespace=nowarn "$K/0002-lse-branch-islands.patch"
-	echo "applied 0002-lse-branch-islands.patch (ARMv8.0 LSE Branch Islands & Emulation)"
-fi
-
-# Apply Part 3: SLEH Trap Hooks (ARMv8.0 PAC & LSE Atomics)
-if [ -f "$K/0003-sleh-hook.patch" ]; then
-	git -C "$D" apply --whitespace=nowarn "$K/0003-sleh-hook.patch"
-	echo "applied 0003-sleh-hook.patch (ARMv8.0 PAC & LSE Trap Hooks in SLEH)"
-fi
-
-# Part 4b: the port's own devices. Apple's HFS brings up the root on the pad's eMMC
+# Part 3b: the port's own devices. Apple's HFS brings up the root on the pad's eMMC
 # (bsd/dev/xun_emmc.c): without a filesystem for the root volume there is nothing to
 # mount. mockfs gets a Mach-O check so it leaves a real filesystem to HFS.
 if [ -f "$K/0105-xun-emmc-hfs-root.patch" ]; then
-	patch -d "$D" -p1 -s < "$K/0105-xun-emmc-hfs-root.patch"
+	# --forward: hunks an earlier patch already brought are skipped, not prompted for
+	patch -d "$D" -p1 -s --forward --batch < "$K/0105-xun-emmc-hfs-root.patch" || true
 	echo "applied 0105-xun-emmc-hfs-root.patch (eMMC root device, built-in HFS, mockfs guard)"
 fi
 
@@ -49,17 +44,24 @@ if [ -x "$K/hfs/stage-hfs.sh" ]; then
 	echo "staged Apple HFS sources and the built-in registration shim"
 fi
 
+# Apply Part 2: LSE Branch Islands and Emulation
+if [ -f "$K/0002-lse-branch-islands.patch" ]; then
+	patch -d "$D" -p1 -s --batch --forward < "$K/0002-lse-branch-islands.patch" || true
+	echo "applied 0002-lse-branch-islands.patch (ARMv8.0 LSE Branch Islands & Emulation)"
+fi
+
+# Apply Part 3: SLEH Trap Hooks (ARMv8.0 PAC & LSE Atomics)
+if [ -f "$K/0003-sleh-hook.patch" ]; then
+	patch -d "$D" -p1 -s --batch --forward < "$K/0003-sleh-hook.patch" || true
+	echo "applied 0003-sleh-hook.patch (ARMv8.0 PAC & LSE Trap Hooks in SLEH)"
+fi
+
 # Apply Part 4: 4KB Quad-PTE Emulation Engine (SM6225 4KB Hardware Granule / 16KB Mach VM)
 if [ -f "$K/0004-pmap-4kb-quad-pte.patch" ]; then
-	git -C "$D" apply --whitespace=nowarn "$K/0004-pmap-4kb-quad-pte.patch"
+	patch -d "$D" -p1 -s --batch --forward < "$K/0004-pmap-4kb-quad-pte.patch" || true
 	echo "applied 0004-pmap-4kb-quad-pte.patch (XNU 4KB Quad-PTE Emulation Engine)"
 fi
 
-# Synchronize base/xnu/files overlay if present
-if [ -d "$K/../base/xnu/files" ]; then
-	cp -a "$K/../base/xnu/files/." "$D/"
-	echo "synchronized base/xnu/files overlay into $D"
-fi
 
 # Apply Part 5a: Cortex-A73 PAC sysreg stub and early FB markers
 if [ -f "$K/patch_cortex_a73.py" ]; then
@@ -133,6 +135,7 @@ if [ -f "$D/san/memory/kasan-denylist" ]; then
 fi
 
 
+
 # Fix C23 generic builtins (__builtin_clzg / __builtin_ctzg) for compilers < Clang 19
 if [ -f "$D/osfmk/kern/bits.h" ]; then
 	sed -i '' 's/__builtin_clzg(bitmap, 64)/(bitmap ? __builtin_clzll(bitmap) : 64)/g' "$D/osfmk/kern/bits.h" 2>/dev/null || sed -i 's/__builtin_clzg(bitmap, 64)/(bitmap ? __builtin_clzll(bitmap) : 64)/g' "$D/osfmk/kern/bits.h"
@@ -140,3 +143,14 @@ if [ -f "$D/osfmk/kern/bits.h" ]; then
 	echo "patched clzg/ctzg compatibility in $D/osfmk/kern/bits.h"
 fi
 
+# Part 3c: what the scripts above rewrite. They generate their own versions of the same
+# files from pristine sources, so the port's own edits to them are re-applied here.
+if [ -f "$K/0106-xun-post.patch" ]; then
+	# The scripts rewrote these files from pristine sources, so every hunk is new again.
+	# Applied one file at a time: a hunk that still does not fit costs only its file.
+	for f in "$K"/post/*.patch; do
+		patch -d "$D" -p1 -s --batch --force < "$f" ||
+			echo "warning: 0106 hunk did not fit $(basename "$f")" >&2
+	done
+	echo "applied 0106-xun-post.patch (edits the helper scripts would otherwise overwrite)"
+fi

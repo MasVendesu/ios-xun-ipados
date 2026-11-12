@@ -1,0 +1,14 @@
+diff --git a/osfmk/arm64/lse_decode.h b/osfmk/arm64/lse_decode.h
+--- a/osfmk/arm64/lse_decode.h
++++ b/osfmk/arm64/lse_decode.h
+@@ -91,8 +91,8 @@
+ 
+     /*
+      * 3. Atomic memory operations (LDADD, LDCLR, LDEOR, LDSET, SWP, LDSMAX, LDSMIN, LDUMAX, LDUMIN)
+-     * Pattern: size[31:30] 111000 A[23] R[22] 1[21] Rs[20:16] o3[15] opc[14:12] 00 Rn[9:5] Rt[4:0]
+-     * Bits [29:24] == 0b111000 (0x38 << 24), Bit 21 == 1 (0x00200000)
++     * Pattern: size[31:30] 111000 0 A R Rs[20:16] o3[15] opc[14:12] 00 Rn[9:5] Rt[4:0]
++     * Bits [29:23] == 0b1110000 (0x38 << 24, bit 23 = 0)
+      * Bits [11:10] == 0b00
+      */
+     if ((inst & 0x3F200C00) == 0x38200000) {

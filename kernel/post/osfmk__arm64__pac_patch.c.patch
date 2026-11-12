@@ -1,0 +1,232 @@
+diff --git a/osfmk/arm64/pac_patch.c b/osfmk/arm64/pac_patch.c
+--- a/osfmk/arm64/pac_patch.c
++++ b/osfmk/arm64/pac_patch.c
+@@ -3,11 +3,11 @@
+  * Part 1 Implementation for HakiOS / XNU-12377 on Snapdragon 685 (Cortex-A73/A53)
+  */
+ 
+-/* Note: Do NOT use __attribute__((target(...))) here because Clang's target
+- * attribute resets -mgeneral-regs-only and allows NEON/FP instructions inside
+- * the synchronous exception handler. Build-time patch_kernel_pac.py converts
+- * any compiler-emitted PAC instructions in __TEXT_EXEC to native ARMv8.0.
+- */
++#if defined(__clang__)
++#pragma clang attribute push (__attribute__((target("branch-protection=none"))), apply_to = function)
++#elif defined(__GNUC__)
++#pragma GCC target ("branch-protection=none")
++#endif
+ 
+ #include <stdint.h>
+ #include <stdbool.h>
+@@ -42,8 +42,7 @@
+ #include "pac_decode.h"
+ 
+ extern unsigned long gVirtBase, gPhysBase;
+-extern uint64_t phystokv(uint64_t pa);
+-#define PHYSTOKV(pa) ((gVirtBase != 0) ? phystokv((uint64_t)(pa)) : (uint64_t)(pa))
++#define PHYSTOKV(pa) ((uint64_t)(pa) + (gVirtBase - gPhysBase))
+ 
+ extern uint64_t kvtophys(vm_offset_t va);
+ extern void loader_log_line(const char *line);
+@@ -54,33 +53,15 @@
+ static uint64_t pac_smp_races = 0;
+ 
+ /*
+- * Ghi đè mã máy tại Physical Address và đồng bộ Cache toàn bộ Core.
+- * Trả về false nếu trang đích là Read-Only (ví dụ __TEXT_EXEC sau arm_vm_init).
++ * Ghi đè mã máy tại Physical Address và đồng bộ Cache toàn bộ Core
+  */
+-static bool
++static void
+ patch_memory_phys(uint64_t pa, uint64_t va, uint32_t new_insn)
+ {
+ 	volatile uint32_t *p = (gVirtBase != 0) ? (volatile uint32_t *)PHYSTOKV(pa) : (volatile uint32_t *)va;
+-	uintptr_t p_va = (uintptr_t)p;
+-	uint64_t par, daif;
+-
+-	__asm__ volatile(
+-		"mrs %0, daif\n"
+-		"msr daifset, #7\n"
+-		"at s1e1w, %2\n"
+-		"isb\n"
+-		"mrs %1, par_el1\n"
+-		"msr daif, %0\n"
+-		: "=&r"(daif), "=&r"(par)
+-		: "r"(p_va)
+-		: "memory"
+-	);
+-	if (par & 1ULL) {
+-		return false;
+-	}
+-
+ 	*p = new_insn;
+ 
++	uintptr_t p_va = (uintptr_t)p;
+ 	__asm__ volatile (
+ 		"dc cvau, %0 \n"
+ 		"dc cvau, %1 \n"
+@@ -90,7 +71,6 @@
+ 		"isb         \n"
+ 		:: "r"(p_va), "r"(va) : "memory"
+ 	);
+-	return true;
+ }
+ 
+ /*
+@@ -153,10 +133,26 @@
+ 		if (copyin((user_addr_t)pc, &insn, sizeof(insn)) != 0) {
+ 			return false;
+ 		}
++		uint64_t par, daif;
++		__asm__ volatile("mrs %0, daif\n msr daifset, #7\n at s1e0r, %1\n isb\n" : "=&r"(daif) : "r"(pc) : "memory");
++		__asm__ volatile("mrs %0, par_el1\n msr daif, %1\n" : "=r"(par) : "r"(daif));
++		if (par & 1ULL) return false;
++		pa = (par & 0x0000FFFFFFFFF000ULL) | (pc & 0xFFFULL);
+ 	} else {
+ 		insn = *(volatile uint32_t *)pc;
++		pa = (gVirtBase != 0) ? kvtophys(pc) : pc;
++		if (!pa) {
++			uint64_t par, daif;
++			__asm__ volatile("mrs %0, daif\n msr daifset, #7\n at s1e1r, %1\n isb\n" : "=&r"(daif) : "r"(pc) : "memory");
++			__asm__ volatile("mrs %0, par_el1\n msr daif, %1\n" : "=r"(par) : "r"(daif));
++			if (!(par & 1ULL)) {
++				pa = (par & 0x0000FFFFFFFFF000ULL) | (pc & 0xFFFULL);
++			}
++		}
+ 	}
+ 
++	if (!pa) return false;
++
+ 	/*
+ 	 * 2. SMP RACE DEFENSE:
+ 	 * Nếu core khác vừa vá xong lệnh này tại RAM, opcode đọc được tại thời điểm này
+@@ -168,112 +164,26 @@
+ 	    (insn & 0xffc00000u) == A64_LDR_UIMM ||
+ 	    (insn & 0xffe00000u) == 0xf8400000u ||
+ 	    (insn & 0x3ffffc00u) == 0x08dffc00u || /* LDAR (ARMv8.0) */
+-	    (insn & 0x3fe00c00u) == 0x38400000u || /* LDUR (ARMv8.0) */
+-	    (insn & 0x3fe00c00u) == 0x38000000u) { /* STUR (ARMv8.0) */
++	    (insn & 0x3fc00c00u) == 0x38400000u || /* LDUR (ARMv8.0) */
++	    (insn & 0x3fc00c00u) == 0x38000000u) { /* STUR (ARMv8.0) */
+ 		pac_smp_races++;
+ 		return true;
+ 	}
+ 
+-	/* 3. Giải mã qua bộ PAC Decoder thuần ARM ARM (trước khi dịch địa chỉ PA!) */
++	/* 3. Giải mã qua bộ PAC Decoder thuần ARM ARM */
+ 	pac_result_t res;
+ 	pac_action_t act = pac_decode(insn, &res);
+-	if (act == PAC_NOT_PAC) {
+-		return false;
+-	}
+-
+-	if (act == PAC_PATCH) {
+-		if (is_user) {
+-			uint64_t par, daif;
+-			__asm__ volatile(
+-				"mrs %0, daif\n"
+-				"msr daifset, #7\n"
+-				"at s1e0r, %2\n"
+-				"isb\n"
+-				"mrs %1, par_el1\n"
+-				"msr daif, %0\n"
+-				: "=&r"(daif), "=&r"(par)
+-				: "r"(pc)
+-				: "memory"
+-			);
+-			if (!(par & 1ULL)) {
+-				pa = (par & 0x0000FFFFFFFFF000ULL) | (pc & 0xFFFULL);
+-			}
+-		} else {
+-			pa = (gVirtBase != 0) ? kvtophys(pc) : pc;
+-			if (!pa) {
+-				uint64_t par, daif;
+-				__asm__ volatile(
+-					"mrs %0, daif\n"
+-					"msr daifset, #7\n"
+-					"at s1e1r, %2\n"
+-					"isb\n"
+-					"mrs %1, par_el1\n"
+-					"msr daif, %0\n"
+-					: "=&r"(daif), "=&r"(par)
+-					: "r"(pc)
+-					: "memory"
+-				);
+-				if (!(par & 1ULL)) {
+-					pa = (par & 0x0000FFFFFFFFF000ULL) | (pc & 0xFFFULL);
+-				}
+-			}
+-		}
+-	}
+ 
+ 	switch (act) {
+ 	case PAC_PATCH:
+-		/* Ghi đè mã máy tại RAM qua Physical Mapping (nếu trang cho phép ghi) */
+-		if (pa && patch_memory_phys(pa, pc, res.new_insn)) {
+-			pac_patch_count++;
+-			/*
+-			 * KHÔNG tăng PC: CPU khi eret sẽ thực thi lại chính địa chỉ PC này,
+-			 * nhưng lúc này lệnh đã trở thành NOP, RET, BLR, LDR... gốc ARMv8.0!
+-			 */
+-			return true;
+-		}
++		/* Ghi đè mã máy tại RAM qua Physical Mapping */
++		patch_memory_phys(pa, pc, res.new_insn);
++		pac_patch_count++;
+ 		/*
+-		 * Trang đích là Read-Only (ví dụ __TEXT_EXEC sau arm_vm_init):
+-		 * Emulate trực tiếp lệnh thay thế res.new_insn để không bị Permission Fault!
++		 * KHÔNG tăng PC: CPU khi eret sẽ thực thi lại chính địa chỉ PC này,
++		 * nhưng lúc này lệnh đã trở thành NOP, RET, BLR, LDR... gốc ARMv8.0!
+ 		 */
+-		if (res.new_insn == A64_NOP) {
+-			set_saved_state_pc(state, pc + 4);
+-			pac_emul_count++;
+-			return true;
+-		}
+-		if (res.new_insn == A64_RET) {
+-			set_saved_state_pc(state, (uint64_t)get_saved_state_reg(state, 30));
+-			pac_emul_count++;
+-			return true;
+-		}
+-		if ((res.new_insn & 0xfffffc1fu) == A64_BR_BASE) {
+-			unsigned int rn = (res.new_insn >> 5) & 31;
+-			set_saved_state_pc(state, (uint64_t)get_saved_state_reg(state, rn));
+-			pac_emul_count++;
+-			return true;
+-		}
+-		if ((res.new_insn & 0xfffffc1fu) == A64_BLR_BASE) {
+-			unsigned int rn = (res.new_insn >> 5) & 31;
+-			uint64_t target = (uint64_t)get_saved_state_reg(state, rn);
+-			set_saved_state_reg(state, 30, pc + 4);
+-			set_saved_state_pc(state, target);
+-			pac_emul_count++;
+-			return true;
+-		}
+-		if ((res.new_insn & 0xffffffe0u) == A64_MOV_X_XZR) {
+-			unsigned int rd = res.new_insn & 31;
+-			if (rd != 31) set_saved_state_reg(state, rd, 0);
+-			set_saved_state_pc(state, pc + 4);
+-			pac_emul_count++;
+-			return true;
+-		}
+-		if ((res.new_insn & 0xffffffe0u) == 0xd2a00800u) {
+-			unsigned int rd = res.new_insn & 31;
+-			if (rd != 31) set_saved_state_reg(state, rd, 0x400000ULL);
+-			set_saved_state_pc(state, pc + 4);
+-			pac_emul_count++;
+-			return true;
+-		}
+-		return false;
++		return true;
+ 
+ 	case PAC_EMULATE_LDRA:
+ 		if (!emulate_ldra(state, &res, is_user)) {
+@@ -287,3 +197,7 @@
+ 		return false;
+ 	}
+ }
++
++#if defined(__clang__)
++#pragma clang attribute pop
++#endif

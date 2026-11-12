@@ -1,80 +1,7 @@
-diff --git a/bsd/conf/Makefile.template b/bsd/conf/Makefile.template
---- a/bsd/conf/Makefile.template	2026-11-11 19:55:29.021924349 +0000
-+++ b/bsd/conf/Makefile.template	2026-11-11 19:55:53.999951875 +0000
-@@ -44,6 +44,16 @@
-         -Warray-bounds-pointer-arithmetic
- SFLAGS+= -include meta_features.h
- 
-+# Apple OSS HFS built in (bsd/xun_hfs): compiled like the kext, see
-+# xun_hfs_compat.h. The compat header must come after the kernel's -D options,
-+# hence _CFLAGS_ADD.
-+XUN_HFS_ROOT = $(SRCROOT)/bsd/xun_hfs
-+XUN_HFS_OBJS = BTree.o BTreeAllocate.o BTreeMiscOps.o BTreeNodeOps.o BTreeNodeReserve.o BTreeScanner.o BTreeTreeOps.o BTreeWrapper.o CatalogUtilities.o FileExtentMapping.o FileIDsServices.o MacOSStubs.o UnicodeWrappers.o VolumeAllocation.o hfs_attrlist.o hfs_btreeio.o hfs_catalog.o hfs_chash.o hfs_cnode.o hfs_cprotect.o hfs_endian.o hfs_extents.o hfs_fsinfo.o hfs_hotfiles.o hfs_journal.o hfs_link.o hfs_lookup.o hfs_notification.o hfs_quota.o hfs_readwrite.o hfs_resize.o hfs_search.o hfs_vfsops.o hfs_vfsutils.o hfs_vnops.o hfs_xattr.o rangelist.o hfs_encodinghint.o hfs_encodings.o xun_hfs_iokit.o
-+$(foreach o,$(XUN_HFS_OBJS),$(eval $(o)_CFLAGS_ADD += -include $(XUN_HFS_ROOT)/xun_hfs_compat.h -I$(XUN_HFS_ROOT) -I$(XUN_HFS_ROOT)/core))
-+# HFSEncodings is a separate kext on Apple with its own allocation counter.
-+hfs_encodings.o_CFLAGS_ADD += -Dhfs_allocated=hfs_encodings_allocated
-+hfs_encodinghint.o_CFLAGS_ADD += -Dhfs_allocated=hfs_encodings_allocated
-+
- #
- # Directories for mig generated files
- #
-diff --git a/bsd/conf/files b/bsd/conf/files
---- a/bsd/conf/files	2026-11-11 19:55:29.661925002 +0000
-+++ b/bsd/conf/files	2026-11-11 19:55:53.998951874 +0000
-@@ -128,6 +128,50 @@
- bsd/dev/redwood_battery.c	standard
- bsd/dev/redwood_ufs.c	standard
- bsd/dev/redwood_ufshc.c	standard
-+bsd/dev/xun_emmc.c	standard
-+
-+# Apple OSS hfs-715.100.10, staged by kernel/hfs/stage-hfs.sh
-+bsd/xun_hfs/core/BTree.c		optional xun_hfs
-+bsd/xun_hfs/core/BTreeAllocate.c		optional xun_hfs
-+bsd/xun_hfs/core/BTreeMiscOps.c		optional xun_hfs
-+bsd/xun_hfs/core/BTreeNodeOps.c		optional xun_hfs
-+bsd/xun_hfs/core/BTreeNodeReserve.c		optional xun_hfs
-+bsd/xun_hfs/core/BTreeScanner.c		optional xun_hfs
-+bsd/xun_hfs/core/BTreeTreeOps.c		optional xun_hfs
-+bsd/xun_hfs/core/BTreeWrapper.c		optional xun_hfs
-+bsd/xun_hfs/core/CatalogUtilities.c		optional xun_hfs
-+bsd/xun_hfs/core/FileExtentMapping.c		optional xun_hfs
-+bsd/xun_hfs/core/FileIDsServices.c		optional xun_hfs
-+bsd/xun_hfs/core/MacOSStubs.c		optional xun_hfs
-+bsd/xun_hfs/core/UnicodeWrappers.c		optional xun_hfs
-+bsd/xun_hfs/core/VolumeAllocation.c		optional xun_hfs
-+bsd/xun_hfs/core/hfs_attrlist.c		optional xun_hfs
-+bsd/xun_hfs/core/hfs_btreeio.c		optional xun_hfs
-+bsd/xun_hfs/core/hfs_catalog.c		optional xun_hfs
-+bsd/xun_hfs/core/hfs_chash.c		optional xun_hfs
-+bsd/xun_hfs/core/hfs_cnode.c		optional xun_hfs
-+bsd/xun_hfs/core/hfs_cprotect.c		optional xun_hfs
-+bsd/xun_hfs/core/hfs_endian.c		optional xun_hfs
-+bsd/xun_hfs/core/hfs_extents.c		optional xun_hfs
-+bsd/xun_hfs/core/hfs_fsinfo.c		optional xun_hfs
-+bsd/xun_hfs/core/hfs_hotfiles.c		optional xun_hfs
-+bsd/xun_hfs/core/hfs_journal.c		optional xun_hfs
-+bsd/xun_hfs/core/hfs_link.c		optional xun_hfs
-+bsd/xun_hfs/core/hfs_lookup.c		optional xun_hfs
-+bsd/xun_hfs/core/hfs_notification.c		optional xun_hfs
-+bsd/xun_hfs/core/hfs_quota.c		optional xun_hfs
-+bsd/xun_hfs/core/hfs_readwrite.c		optional xun_hfs
-+bsd/xun_hfs/core/hfs_resize.c		optional xun_hfs
-+bsd/xun_hfs/core/hfs_search.c		optional xun_hfs
-+bsd/xun_hfs/core/hfs_vfsops.c		optional xun_hfs
-+bsd/xun_hfs/core/hfs_vfsutils.c		optional xun_hfs
-+bsd/xun_hfs/core/hfs_vnops.c		optional xun_hfs
-+bsd/xun_hfs/core/hfs_xattr.c		optional xun_hfs
-+bsd/xun_hfs/core/rangelist.c		optional xun_hfs
-+bsd/xun_hfs/hfs_encodings/hfs_encodinghint.c		optional xun_hfs
-+bsd/xun_hfs/hfs_encodings/hfs_encodings.c		optional xun_hfs
-+bsd/xun_hfs/xun_hfs_iokit.c		optional xun_hfs
-+
- bsd/dev/redwood_net.c	standard
- bsd/dev/redwood_virtio_net.c	standard
- bsd/dev/redwood_apple80211.c	standard
 diff --git a/bsd/dev/xun_emmc.c b/bsd/dev/xun_emmc.c
---- a/bsd/dev/xun_emmc.c	1970-01-01 00:00:00.000000000 +0000
-+++ b/bsd/dev/xun_emmc.c	2026-11-11 19:56:23.720989924 +0000
+new file mode 100644
+--- /dev/null
++++ b/bsd/dev/xun_emmc.c
 @@ -0,0 +1,1186 @@
 +/*
 + * xun_emmc.c - polled SDHCI / eMMC root driver, read and write
@@ -1262,151 +1189,50 @@ diff --git a/bsd/dev/xun_emmc.c b/bsd/dev/xun_emmc.c
 +typedef int xun_emmc_empty_tu_t;
 +#endif /* ARM64_BOARD_CONFIG_BCM2837 */
 +
-diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
---- a/bsd/kern/bsd_init.c	2026-11-11 19:55:29.663925004 +0000
-+++ b/bsd/kern/bsd_init.c	2026-11-11 19:55:53.999951875 +0000
-@@ -708,6 +708,12 @@
- 	bsd_init_kprintf("calling vfsinit\n");
- 	vfsinit();
+diff --git a/makedefs/MakeInc.def b/makedefs/MakeInc.def
+--- a/makedefs/MakeInc.def
++++ b/makedefs/MakeInc.def
+@@ -79,7 +79,7 @@
+ COMPONENT	= $(if $(word 2,$(subst /, ,$(RELATIVE_SOURCE_PATH))),$(word 2,$(subst /, ,$(RELATIVE_SOURCE_PATH))),$(firstword $(subst /, ,$(RELATIVE_SOURCE_PATH))))
+ COMPONENT_IMPORT_LIST = $(filter-out $(COMPONENT),$(COMPONENT_LIST))
  
-+#if XUN_HFS
-+	/* HFS is built in here: register it like its kext would, before mounting root. */
-+	extern void xun_hfs_register(void);
-+	xun_hfs_register();
-+#endif
-+
- #if CONFIG_PROC_UUID_POLICY
- 	/* Initial proc_uuid_policy subsystem */
- 	bsd_init_kprintf("calling proc_uuid_policy_init()\n");
-diff --git a/bsd/miscfs/mockfs/mockfs_vfsops.c b/bsd/miscfs/mockfs/mockfs_vfsops.c
---- a/bsd/miscfs/mockfs/mockfs_vfsops.c	2026-11-11 19:55:29.101924431 +0000
-+++ b/bsd/miscfs/mockfs/mockfs_vfsops.c	2026-11-11 19:56:23.713989914 +0000
-@@ -34,6 +34,9 @@
- #include <miscfs/mockfs/mockfs_vnops.h>
- #include <miscfs/specfs/specdev.h>
- #include <sys/disk.h>
-+#include <mach-o/fat.h>
-+#include <mach-o/loader.h>
-+#include <sys/buf.h>
- #include <sys/errno.h>
- #include <sys/malloc.h>
- #include <sys/mount_internal.h>
-@@ -61,6 +64,37 @@
-  *
-  * Returns 0 on success, or an error.
-  */
-+/*
-+ * mockfs_check_macho: 0 when the first block of rvp carries a Mach-O magic (thin or fat),
-+ * EFTYPE when it does not, or the error of the read.
-+ */
-+static int
-+mockfs_check_macho(vnode_t rvp)
-+{
-+	buf_t bp = NULL;
-+	uint32_t magic = 0;
-+	int error;
-+
-+	error = (int)buf_meta_bread(rvp, 0, DEV_BSIZE, NOCRED, &bp);
-+	if (error) {
-+		return error;
-+	}
-+	memcpy(&magic, (const void *)buf_dataptr(bp), sizeof(magic));
-+	buf_brelse(bp);
-+
-+	switch (magic) {
-+	case MH_MAGIC:
-+	case MH_CIGAM:
-+	case MH_MAGIC_64:
-+	case MH_CIGAM_64:
-+	case FAT_MAGIC:
-+	case FAT_CIGAM:
-+		return 0;
-+	default:
-+		return EFTYPE;
-+	}
-+}
-+
- int
- mockfs_mountroot(mount_t mp, vnode_t rvp, __unused vfs_context_t ctx)
+-MACHINE_FLAGS_ARM64_BCM2837 = -DARM64_BOARD_CONFIG_BCM2837 -Xclang -target-feature -Xclang +pan
++MACHINE_FLAGS_ARM64_BCM2837 = -DARM64_BOARD_CONFIG_BCM2837 -Xclang -target-feature -Xclang -pan
+ MACHINE_FLAGS_ARM64_T8101 = -DARM64_BOARD_CONFIG_T8101			-mcpu=apple-a14
+ MACHINE_FLAGS_ARM64_T8103 = -DARM64_BOARD_CONFIG_T8103                  -mcpu=apple-a14
+ MACHINE_FLAGS_ARM64_T6000 = -DARM64_BOARD_CONFIG_T6000			-mcpu=apple-a14
+diff --git a/osfmk/arm64/cpu.c b/osfmk/arm64/cpu.c
+--- a/osfmk/arm64/cpu.c
++++ b/osfmk/arm64/cpu.c
+@@ -345,7 +345,7 @@
+ 		cpu_data_ptr->cpu_sleep_token = ARM_CPU_ON_SLEEP_PATH;
+ 		// hang CPU on spurious wakeup
+ 		cpu_data_ptr->cpu_reset_handler = (uintptr_t)0;
+-		__builtin_arm_dsb(DSB_ISH);
++		__builtin_arm_dsb(DSB_NSH);
+ 		CleanPoU_Dcache();
+ #if APPLEVIRTUALPLATFORM
+ 		arm64_prepare_for_sleep(deep_sleep, cpu_data_ptr->cpu_number, ml_vtophys(reset_vector_vaddr));
+diff --git a/osfmk/arm64/generic_arm64_support.c b/osfmk/arm64/generic_arm64_support.c
+--- a/osfmk/arm64/generic_arm64_support.c
++++ b/osfmk/arm64/generic_arm64_support.c
+@@ -11,6 +11,7 @@
+ void
+ ml_enable_monitor(void)
  {
-@@ -72,9 +106,14 @@
- 	dk_memdev_info_t memdev_info;
++	return; /* hk: monitor stub */
+ }
  
- 	/*
--	 * TODO: Validate that the device at least LOOKS like a mach-o (has a sane header); this would prevent us
--	 *   from causing EBADMACHO panics further along the boot path.
-+	 * mockfs serves the whole root device as one executable, so it would claim any device.
-+	 * Accept only a Mach-O (thin or fat) image, so that a device holding a real filesystem
-+	 * (HFS+ on the phone's userdata) is left to the next filesystem in mountroot; without
-+	 * this the boot would fail with EBADMACHO instead of falling through.
- 	 */
-+	if (mockfs_check_macho(rvp) != 0) {
-+		return EAUTH;
-+	}
+ /*
+diff --git a/osfmk/arm64/pcb.c b/osfmk/arm64/pcb.c
+--- a/osfmk/arm64/pcb.c
++++ b/osfmk/arm64/pcb.c
+@@ -475,7 +475,7 @@
+ 		 * cannot further limit this operation e.g. by setting a per-thread flag to indicate
+ 		 * a pending kernel TLB or cache maintenance instruction.
+ 		 */
+-		__builtin_arm_dsb(DSB_ISH);
++		__builtin_arm_dsb(DSB_NSH);
  
- 	/*
- 	 * There are no M_MOCKFS* definitions at the moment, just use M_TEMP.
-diff --git a/config/MASTER b/config/MASTER
---- a/config/MASTER	2026-11-11 19:55:29.666925007 +0000
-+++ b/config/MASTER	2026-11-11 19:55:53.998951874 +0000
-@@ -112,6 +112,7 @@
- #	4.4 filesystems
- #
- options		MOCKFS		# Boot from an executable	# <mockfs>
-+options		XUN_HFS	# Built-in Apple OSS HFS	# <xun_hfs>
- options		APFS		# Apple File System, read only	# <apfs>
- options		RAMFS		# Read-write filesystem in memory	# <ramfs>
- options		FIFO		# fifo support			# <fifo>
-diff --git a/config/MASTER.arm64.bcm2837 b/config/MASTER.arm64.bcm2837
---- a/config/MASTER.arm64.bcm2837	2026-11-11 19:55:29.666925007 +0000
-+++ b/config/MASTER.arm64.bcm2837	2026-11-11 19:55:53.998951874 +0000
-@@ -24,7 +24,7 @@
- #  BSD_RELEASE =    [ BSD_BASE no_printf_str no_kprintf_str secure_kernel ]
- #  BSD_DEV =        [ BSD_BASE config_netboot config_imgsrc_access config_coredump config_ucoredump pgo config_vnguard ]
- #  BSD_DEBUG =      [ BSD_BASE config_netboot config_imgsrc_access config_coredump config_ucoredump pgo config_vnguard ]
--#  FILESYS_BASE =   [ devfs fifo fs_compression config_protect config_mnt_rootsnap config_triggers config_fse routefs namedstreams config_dataless_files bindfs mockfs ramfs apfs]
-+#  FILESYS_BASE =   [ devfs fifo fs_compression config_protect config_mnt_rootsnap config_triggers config_fse routefs namedstreams config_dataless_files bindfs mockfs ramfs apfs xun_hfs]
- #  FILESYS_RELEASE= [ FILESYS_BASE ]
- #  FILESYS_DEV =    [ FILESYS_BASE config_union_mounts fdesc ]
- #  FILESYS_DEBUG =  [ FILESYS_BASE config_union_mounts fdesc ]
-diff --git a/iokit/bsddev/IOKitBSDInit.cpp b/iokit/bsddev/IOKitBSDInit.cpp
---- a/iokit/bsddev/IOKitBSDInit.cpp	2026-11-11 19:55:29.667925008 +0000
-+++ b/iokit/bsddev/IOKitBSDInit.cpp	2026-11-11 19:56:23.713989914 +0000
-@@ -43,6 +43,9 @@
- #include <vm/pmap.h>
- #include <vm/vm_map.h>
- #include <pexpert/pexpert.h>
-+#if defined(__arm64__)
-+#include <pexpert/arm64/board_config.h>
-+#endif
- #include <kern/clock.h>
- #if CONFIG_KDP_INTERACTIVE_DEBUGGING
- #include <kern/debug.h>
-@@ -813,6 +816,27 @@
- 		}
- 	}
- 
-+#if defined(ARM64_BOARD_CONFIG_BCM2837)
-+	/*
-+	 * rd=emmcroot0: the root on the pad's eMMC through this port's own polled SDHCI
-+	 * driver (bsd/dev/xun_emmc.c). It resolves the partition named by emmcroot= from
-+	 * the GPT and hands back a dev_t.
-+	 */
-+	if (rdBootVar[0] != 0) {
-+		extern int xun_emmc_find_root(const char *rd, char *root_name, size_t name_sz, dev_t *root);
-+		int emmc_error = xun_emmc_find_root(rdBootVar, rootName, rootNameSize, root);
-+
-+		if (emmc_error < 0) {
-+			panic("IOFindBSDRoot: XUN emmc root %s unavailable: %d", rdBootVar, -emmc_error);
-+		}
-+		if (emmc_error > 0) {
-+			IOLog("BSD root: %s, major %d, minor %d\n", rootName, major(*root), minor(*root));
-+			*oflags = 0;
-+			goto iofrootx;
-+		}
-+	}
-+#endif /* ARM64_BOARD_CONFIG_BCM2837 */
-+
- //
- //	Now check if we are trying to root on a memory device
- //
+ 		/*
+ 		 * An ISB is needed for similar userspace reasons to the DSB above. Unlike the DSB

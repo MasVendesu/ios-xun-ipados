@@ -88,6 +88,8 @@ jobs:
           export RC_ProjectSourceVersion=12377.121.6
           export RC_ProjectName=xnu
           export XNU_SDK_VERSION=26.0
+          # the port patch keeps a Linux-host build possible with a stock clang
+          export STATIC_IF_PLAIN=1 XNU_NO_PAC=1
           export XNU_SDK_PATH="$(xcrun --sdk iphoneos --show-sdk-path)"
           export LIBRARY_PATH="$(xcrun --sdk iphoneos --show-sdk-path)/usr/local/lib/kernel:$PWD/base/xnu-deps/sdk/iPhoneOS.xnu.sdk/usr/local/lib/kernel:$LIBRARY_PATH"
           bash base/xnu-build.sh -j$(sysctl -n hw.ncpu) -k

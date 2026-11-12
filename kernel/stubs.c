@@ -143,3 +143,30 @@ void nw_wifi_set_events(const void *ev) {
 
 void nw_wifi_status_get(void *st) {
 }
+
+/*
+ * arm64e / pointer-authentication pieces the kernel asks for when it is built for a
+ * target where __has_feature(ptrauth_calls) is true. Stock Linux clang has no such
+ * feature, so the guards compile the real ones out; these keep the link whole.
+ */
+int arm64_cpusubtype_uses_ptrauth(void) {
+	return 0;                       /* no PAC on the Kryo cores */
+}
+
+int arm_user_jop_disabled(void) {
+	return 1;                       /* JOP hash checks need PAC too */
+}
+
+const char *iBoot_Stage_2_version = "enxerto";
+
+void *shared_region_find_key(char *shared_region_id) {
+	(void)shared_region_id;
+	return 0;                       /* keyed by the region id; unused without PAC */
+}
+
+void task_get_vm_shared_region_id_and_jop_pid(void *task, unsigned long long *jop_pid) {
+	(void)task;
+	if (jop_pid) {
+		*jop_pid = 0;
+	}
+}

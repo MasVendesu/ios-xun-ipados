@@ -1,0 +1,11 @@
+diff --git a/config/MASTER b/config/MASTER
+--- a/config/MASTER
++++ b/config/MASTER
+@@ -112,6 +112,7 @@
+ #	4.4 filesystems
+ #
+ options		MOCKFS		# Boot from an executable	# <mockfs>
++options		XUN_HFS	# Built-in Apple OSS HFS	# <xun_hfs>
+ options		APFS		# Apple File System, read only	# <apfs>
+ options		RAMFS		# Read-write filesystem in memory	# <ramfs>
+ options		FIFO		# fifo support			# <fifo>

@@ -7,7 +7,18 @@ cd "$XNU_SRC" || exit 1
 # (tools/mk-ath12k.sh, peach); each build has at most one.
 LX=$XNUDEPS/build/ath11k/out/ath11k.o
 [ -f "$LX" ] || LX=$XNUDEPS/build/ath12k/out/ath12k.o
-[ -f "$LX" ] || LX=$DARWIN_REDWOOD/../kernel/stubs.o
+# No radio driver object on this board: kernel/stubs.c carries the symbols the closed
+# kexts would give (firehose, the JOP/ptrauth helpers) -- build it when it is not there.
+STUBS=$DARWIN_REDWOOD/../kernel/stubs.o
+if [ -f "$DARWIN_REDWOOD/../kernel/stubs.c" ]; then
+	[ -f "$STUBS" ] || {
+		xnu-clang -c -Os -mkernel -nostdinc -D_KERNEL -DARM64_BOARD_CONFIG_BCM2837 \
+			-I"${XNU_SRC:-.}/osfmk" -I"${XNU_SRC:-.}/bsd" -I"${XNU_SRC:-.}/libkern" -I"${XNU_SRC:-.}/iokit" \
+			-I"${XNU_SRC:-.}/pexpert" -I"${XNU_SRC:-.}/EXTERNAL_HEADERS" \
+			-o "$STUBS" "$DARWIN_REDWOOD/../kernel/stubs.c"
+	}
+fi
+[ -f "$LX" ] || LX=$STUBS
 # The objects of arm64 and arm64e builds land in the same directory (the machine configuration, not
 # the architecture, names it), and make cannot tell them apart: start over when the architecture
 # changes. The kernel's own static libraries (xnu-deps/setup.sh) need the same architecture; see
@@ -30,8 +41,12 @@ if [ -n "$XNU_HOST_DARWIN" ]; then
 	HOSTCC="clang -I$XNUDEPS/hostinc-darwin -Wno-unused-command-line-argument"
 else
 	HOSTCC="clang -include $XNUDEPS/hostinc/hostcompat.h -I$XNUDEPS/hostinc -Wno-unused-command-line-argument -Wno-error=implicit-function-declaration"
+	# A Linux host builds with a stock clang: the pointer-authentication paths and the
+	# static-if asm goto cannot be used, so both are switched off for the whole build.
+	export STATIC_IF_PLAIN=${STATIC_IF_PLAIN:-1}
+	export XNU_NO_PAC=${XNU_NO_PAC:-1}
 fi
 exec make RC_DARWIN_KERNEL_VERSION=${RC_DARWIN_KERNEL_VERSION:-26.0.0} RC_ProjectSourceVersion=${RC_ProjectSourceVersion:-12377.121.6} \
-  REDWOOD_OBJECTS="$LX" SDKROOT="${XNU_SDK_PATH:-iphoneos}" ARCH_CONFIGS=ARM64 MACHINE_CONFIGS=${MACHINE:-BCM2837} KERNEL_CONFIGS=DEVELOPMENT \
+  REDWOOD_OBJECTS="$LX" SDKROOT="${XNU_SDK_PATH:-iphoneos}" ARCH_CONFIGS=ARM64 MACHINE_CONFIGS=${MACHINE:-BCM2837} ${XNU_EXTRA_DEFS:-} KERNEL_CONFIGS=DEVELOPMENT \
   ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG=${XNU_ARCH:-arm64e} BUILD_WERROR=0 BUILD_LTO=0 DO_CTFMERGE=0 BUILD_DSYM=0 \
   HOST_CC="$HOSTCC" HOST_FLEX=flex HOST_BISON=bison HOST_GM4=m4 CC=xnu-clang CXX=xnu-clang++ LOGCOLORS=n "$@"

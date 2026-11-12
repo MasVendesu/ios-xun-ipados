@@ -68,4 +68,19 @@ static inline mode_t getmode(const void *set, mode_t omode) { (void)omode; retur
 #ifndef EFTYPE
 #define EFTYPE EINVAL
 #endif
+/* BSD bounded string functions glibc lacks (libbsd is not everywhere). */
+#ifndef _BSD_STRING_H_
+static inline size_t strlcpy(char *dst, const char *src, size_t size) {
+	size_t n = strlen(src);
+	if (size) { size_t c = n >= size ? size - 1 : n; memcpy(dst, src, c); dst[c] = 0; }
+	return n;
+}
+static inline size_t strlcat(char *dst, const char *src, size_t size) {
+	size_t d = strnlen(dst, size), n = strlen(src);
+	if (d == size) return size + n;
+	size_t c = n >= size - d ? size - d - 1 : n;
+	memcpy(dst + d, src, c); dst[d + c] = 0;
+	return d + n;
+}
+#endif
 #endif

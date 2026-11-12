@@ -282,7 +282,8 @@ stage2() {
 	echo "${XNU_ARCH:-arm64e}" > $lib/.arch
 }
 
-[ -n "$XNU_HOST_DARWIN" ] && stage1() { stage1_darwin; }
+# (the bare test must not end the script under set -e when it is empty)
+if [ -n "$XNU_HOST_DARWIN" ]; then stage1() { stage1_darwin; }; fi
 case "$1" in
 --stage1) stage1 ;;
 --stage2) stage2 ;;

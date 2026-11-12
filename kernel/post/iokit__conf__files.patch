@@ -1,0 +1,23 @@
+diff --git a/iokit/conf/files b/iokit/conf/files
+--- a/iokit/conf/files
++++ b/iokit/conf/files
+@@ -96,7 +96,8 @@
+ 
+ iokit/Kernel/IONVRAM.cpp				optional iokitcpp
+ 
+-iokit/Kernel/IOExtensiblePaniclog.cpp   optional iokitcpp
++iokit/Kernel/IOExtensiblePaniclog.cpp   optional iokitcpp # disabled: iig impl
++# iokit/Kernel/IOExtensiblePaniclog.cpp   optional iokitcpp
+ 
+ iokit/Kernel/IODMAController.cpp			optional iokitcpp
+ iokit/Kernel/IOInterruptController.cpp			optional iokitcpp
+@@ -121,7 +122,8 @@
+ iokit/Tests/TestServices/TestIOServiceUserNotification.cpp optional iokitcpp
+ iokit/Tests/TestServices/TestIODataQueues.cpp optional iokitcpp
+ ./Tests/TestServices/TestDextRematch.iig.cpp optional iokitcpp
+-iokit/Tests/TestServices/TestDextRematchKernel.cpp optional iokitcpp
++# the class body comes from the .iig above, which this build does not run first:
++# iokit/Tests/TestServices/TestDextRematchKernel.cpp optional iokitcpp
+ 
+ iokit/Kernel/IOStatistics.cpp				optional iokitcpp
+ iokit/Kernel/IOInterruptAccounting.cpp			optional iokitcpp

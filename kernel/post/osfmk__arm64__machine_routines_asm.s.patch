@@ -1,0 +1,25 @@
+diff --git a/osfmk/arm64/machine_routines_asm.s b/osfmk/arm64/machine_routines_asm.s
+--- a/osfmk/arm64/machine_routines_asm.s
++++ b/osfmk/arm64/machine_routines_asm.s
+@@ -2095,7 +2095,11 @@
+  * ptrauth_utils_sign_blob_generic(const void * ptr, size_t len_bytes, uint64_t data, int flags)
+  *
+  * See "Signing arbitrary data blobs" of doc/arm/pac.md
++ *
++ * Left out when the target has no PAC: libkern/ptrauth_utils.c has the C answer then,
++ * and both define the same symbol. The .s is preprocessed, so the C macro is visible.
+  */
++#if !defined(NO_APPLE_PAC_BLOB_SIGN)
+ 	.text
+ 	.align 2
+ 	.globl EXT(ptrauth_utils_sign_blob_generic)
+@@ -2159,7 +2163,8 @@
+ 	POP_FRAME
+ 	ARM64_STACK_EPILOG EXT(ptrauth_utils_sign_blob_generic)
+ 
+-#endif // defined(HAS_APPLE_PAC)
++#endif // !defined(NO_APPLE_PAC_BLOB_SIGN)
++#endif /* defined(HAS_APPLE_PAC) */
+ 
+ #if CONFIG_EXCLAVES && NEEDS_MTE_IRG_RESEED
+ 	.text

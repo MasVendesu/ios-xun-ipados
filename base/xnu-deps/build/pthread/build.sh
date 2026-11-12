@@ -5,7 +5,11 @@
 set -e
 cd "$(dirname "${BASH_SOURCE[0]}")"
 source ../../../xnu-env.sh
+# the per-config build directory holds generated headers (mach_assert.h) the kernel gets too
 X=$XNU_SRC; E=$X/BUILD/obj/EXPORT_HDRS; P=$XNUDEPS/libpthread
+# generated headers live one level down, per subsystem; -isystem takes a list
+XNU_OBJ_HDRS=$(ls -d $X/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/*/DEVELOPMENT 2>/dev/null | tr '\n' ' ')
+export XNU_OBJ_HDRS
 mkdir -p $XNU_SDK_PATH/usr/local/lib/kernel
 objs=()
 for f in kern_init kern_support kern_synch; do
@@ -13,7 +17,7 @@ for f in kern_init kern_support kern_synch; do
     -DKERNEL=1 -DKERNEL_PRIVATE=1 -DXNU_KERNEL_PRIVATE=1 -DMACH_KERNEL_PRIVATE=1 -DPRIVATE=1 -D__PTHREAD_EXPOSE_INTERNALS__=1 \
     -Dpthread_kern=pthread_kext_kern -Dcurrent_uthread=pthread_kext_current_uthread -D__DARWIN_64_BIT_INO_T=1 -DARM64_BOARD_CONFIG_BCM2837 \
     -Iinc -I$P -I$E/osfmk -I$E/bsd -I$E/libkern -I$E/pexpert -I$E/iokit -I$E/security -I$X/EXTERNAL_HEADERS \
-    -I$P/include -I$P/private -o pthread_$f.o $P/kern/$f.c 2>&1 || true
+    -I$P/include -I$P/private -I$X/osfmk -o pthread_$f.o $P/kern/$f.c 2>&1 || true
   [ -f pthread_$f.o ] && objs+=("pthread_$f.o")
 done
 if [ ${#objs[@]} -ge 3 ]; then

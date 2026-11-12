@@ -1,0 +1,17 @@
+diff --git a/iokit/IOKit/IOService.h b/iokit/IOKit/IOService.h
+--- a/iokit/IOKit/IOService.h
++++ b/iokit/IOKit/IOService.h
+@@ -403,6 +403,13 @@
+ 
+ class IOService : public IORegistryEntry
+ {
++public:
++	/* Declared by DriverKit/IOService.iig only; the kernel-side bodies are in
++	 * IOUserServer.cpp, so the declarations are here. */
++	virtual kern_return_t SetPowerOverride_Impl(bool enable);
++	virtual kern_return_t ReleasePMAssertion_Impl(uint64_t assertionID);
++	virtual kern_return_t CreatePMAssertion_Impl(uint32_t assertionBits, uint64_t * assertionID, bool synced);
++
+ 	OSDeclareDefaultStructorsWithDispatch(IOService);
+ 
+ #if XNU_KERNEL_PRIVATE

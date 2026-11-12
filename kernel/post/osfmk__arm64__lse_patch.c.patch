@@ -1,0 +1,212 @@
+diff --git a/osfmk/arm64/lse_patch.c b/osfmk/arm64/lse_patch.c
+--- a/osfmk/arm64/lse_patch.c
++++ b/osfmk/arm64/lse_patch.c
+@@ -22,11 +22,11 @@
+  * 7. Condition Flags Preservation: Saves and restores NZCV across all operations.
+  */
+ 
+-/* Note: Do NOT use __attribute__((target(...))) here because Clang's target
+- * attribute resets -mgeneral-regs-only and allows NEON/FP instructions inside
+- * the synchronous exception handler. Build-time patch_kernel_pac.py converts
+- * any compiler-emitted PAC instructions in __TEXT_EXEC to native ARMv8.0.
+- */
++#if defined(__clang__)
++#pragma clang attribute push (__attribute__((target("branch-protection=none"))), apply_to = function)
++#elif defined(__GNUC__)
++#pragma GCC target ("branch-protection=none")
++#endif
+ 
+ #include <stdint.h>
+ #include <stdbool.h>
+@@ -48,7 +48,7 @@
+ extern void set_saved_state_pc(arm_saved_state_t *state, uint64_t pc);
+ 
+ extern int copyin(const void *uaddr, void *kaddr, size_t len);
+-extern uintptr_t pmap_find_phys(void *pmap, uintptr_t va);
++extern uint64_t pmap_find_pa(void *pmap, uintptr_t va);
+ extern uint64_t kvtophys(uintptr_t va);
+ extern void *current_task(void);
+ 
+@@ -63,8 +63,7 @@
+ } *vm_map_t;
+ 
+ extern unsigned long gVirtBase, gPhysBase;
+-extern uint64_t phystokv(uint64_t pa);
+-#define PHYSTOKV(pa) ((gVirtBase != 0) ? phystokv((uint64_t)(pa)) : (uint64_t)(pa))
++#define PHYSTOKV(pa) ((uint64_t)(pa) + (gVirtBase - gPhysBase))
+ 
+ /* Register 31 Safety Helpers */
+ static inline uint64_t lse_get_reg(arm_saved_state_t *state, unsigned int reg) {
+@@ -143,75 +142,16 @@
+ 
+     void *kptr = NULL;
+     if (is_user) {
+-        task_t t = (task_t)current_task();
+-        if (!t || !t->map || !t->map->pmap) return false;
+-        uint64_t pa = pmap_find_phys(t->map->pmap, addr);
+-        if (!pa) return false;
++        uint64_t par, daif;
++        __asm__ volatile("mrs %0, daif\n msr daifset, #7\n at s1e0r, %1\n isb\n" : "=&r"(daif) : "r"(addr) : "memory");
++        __asm__ volatile("mrs %0, par_el1\n msr daif, %1\n" : "=r"(par) : "r"(daif));
++        if (par & 1ULL) return false;
++        uint64_t pa = (par & 0x0000FFFFFFFFF000ULL) | (addr & 0xFFFULL);
+         kptr = (void *)PHYSTOKV(pa);
+     } else {
+-        /*
+-         * In kernel mode (!is_user), addr is already a valid, writable kernel VA
+-         * (whether in __DATA, stack, physical aperture avail_va, or zone map).
+-         */
+-        if (!addr) return false;
+         kptr = (void *)addr;
+     }
+-
+-    /*
+-     * Hardware Alignment Guard:
+-     * Cortex-A73 ARMv8.0 exclusive monitor generates Alignment Fault (FSC=33)
+-     * if exclusive load/store (ldxr/stxr) is not naturally aligned.
+-     * If unaligned, perform atomic read-modify-write with local DAIF masked.
+-     */
+-    size_t req_align = (dec->size == LSE_SIZE_64) ? 8 : ((dec->size == LSE_SIZE_32) ? 4 : ((dec->size == LSE_SIZE_16) ? 2 : 1));
+-    if (((uintptr_t)kptr & (req_align - 1)) != 0) {
+-        uint64_t daif;
+-        __asm__ volatile("mrs %0, daif\n msr daifset, #7" : "=r"(daif) :: "memory");
+-        if (dec->type == LSE_TYPE_CAS) {
+-            uint64_t cur = 0;
+-            const uint8_t *s = (const uint8_t *)kptr;
+-            uint8_t *d = (uint8_t *)&cur;
+-            for (size_t i = 0; i < req_align; i++) d[i] = s[i];
+-            uint64_t mask = (req_align == 8) ? ~0ULL : ((req_align == 4) ? 0xFFFFFFFFULL : 0xFFFFULL);
+-            if ((cur & mask) == (rs_val & mask)) {
+-                const uint8_t *ws = (const uint8_t *)&rt_val;
+-                uint8_t *wd = (uint8_t *)kptr;
+-                for (size_t i = 0; i < req_align; i++) wd[i] = ws[i];
+-            }
+-            lse_set_reg(state, dec->rs, cur);
+-            __asm__ volatile("msr daif, %0" :: "r"(daif) : "memory");
+-            return true;
+-        } else {
+-            uint64_t cur = 0, next = 0;
+-            const uint8_t *s = (const uint8_t *)kptr;
+-            uint8_t *d = (uint8_t *)&cur;
+-            for (size_t i = 0; i < req_align; i++) d[i] = s[i];
+-            switch (dec->type) {
+-                case LSE_TYPE_SWP:   next = rs_val; break;
+-                case LSE_TYPE_LDADD: next = cur + rs_val; break;
+-                case LSE_TYPE_LDCLR: next = cur & ~rs_val; break;
+-                case LSE_TYPE_LDSET: next = cur | rs_val; break;
+-                case LSE_TYPE_LDEOR: next = cur ^ rs_val; break;
+-                case LSE_TYPE_LDSMAX:
+-                    if (req_align == 8) next = ((int64_t)cur > (int64_t)rs_val) ? cur : rs_val;
+-                    else next = ((int32_t)cur > (int32_t)rs_val) ? cur : rs_val;
+-                    break;
+-                case LSE_TYPE_LDSMIN:
+-                    if (req_align == 8) next = ((int64_t)cur < (int64_t)rs_val) ? cur : rs_val;
+-                    else next = ((int32_t)cur < (int32_t)rs_val) ? cur : rs_val;
+-                    break;
+-                case LSE_TYPE_LDUMAX: next = (cur > rs_val) ? cur : rs_val; break;
+-                case LSE_TYPE_LDUMIN: next = (cur < rs_val) ? cur : rs_val; break;
+-                default: next = cur; break;
+-            }
+-            const uint8_t *ws = (const uint8_t *)&next;
+-            uint8_t *wd = (uint8_t *)kptr;
+-            for (size_t i = 0; i < req_align; i++) wd[i] = ws[i];
+-            __asm__ volatile("msr daif, %0" :: "r"(daif) : "memory");
+-            lse_set_reg(state, dec->rt, cur);
+-            return true;
+-        }
+-    }
++    if (!kptr) return false;
+ 
+     if (dec->type == LSE_TYPE_CAS) {
+         if (dec->size == LSE_SIZE_64) {
+@@ -326,6 +266,22 @@
+     __attribute__((aligned(64)));
+ static uint32_t lse_kernel_count = 0;
+ 
++static bool
++lse_reserve_kernel_slot(uint32_t *slot_index)
++{
++	uint32_t current = __atomic_load_n(&lse_kernel_count, __ATOMIC_RELAXED);
++
++	while (current < LSE_ISLAND_MAX_SLOTS) {
++		if (__atomic_compare_exchange_n(&lse_kernel_count, &current, current + 1,
++		    false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
++			*slot_index = current;
++			return true;
++		}
++	}
++
++	return false;
++}
++
+ /*
+  * Scratch Register Selector: Picks 3 distinct registers not in {rs, rt, rn}
+  * For CASP, also ensures scratches do not overlap rs1 or rt1.
+@@ -611,7 +567,7 @@
+             continue;
+         }
+ 
+-        uint64_t page_pa = pmap_find_phys(pmap, cur_page);
++        uint64_t page_pa = pmap_find_pa(pmap, cur_page);
+         if (!page_pa) {
+             continue;
+         }
+@@ -679,8 +635,9 @@
+     void *pmap = NULL;
+ 
+     if (!is_user) {
+-        if (lse_kernel_count >= LSE_ISLAND_MAX_SLOTS) return false;
+-        uint32_t *slot = &lse_kernel_pool[lse_kernel_count * LSE_STUB_WORDS];
++        uint32_t slot_index;
++        if (!lse_reserve_kernel_slot(&slot_index)) return false;
++        uint32_t *slot = &lse_kernel_pool[slot_index * LSE_STUB_WORDS];
+         slot_va = (uintptr_t)slot;
+         pa_stub = kvtophys(slot_va);
+         if (!pa_stub) return false;
+@@ -692,7 +649,7 @@
+         slot_va = find_el0_code_cave(pmap, elr, LSE_STUB_WORDS * 4);
+         if (!slot_va) return false;
+ 
+-        pa_stub = pmap_find_phys(pmap, slot_va);
++        pa_stub = pmap_find_pa(pmap, slot_va);
+         if (!pa_stub) return false;
+     }
+ 
+@@ -709,14 +666,11 @@
+     }
+ 
+     /* Patch faulting site with branch to island stub */
+-    uint64_t pa_site = is_user ? pmap_find_phys(pmap, elr) : kvtophys(elr);
++    uint64_t pa_site = is_user ? pmap_find_pa(pmap, elr) : kvtophys(elr);
+     if (!pa_site) return false;
+ 
+     patch_memory_phys(pa_site, elr, b_to_island);
+ 
+-    if (!is_user) {
+-        lse_kernel_count++;
+-    }
+     return true;
+ }
+ 
+@@ -750,12 +704,7 @@
+         return false;
+     }
+ 
+-    /*
+-     * Attempt branch island trampoline installation ONLY for EL0 userland.
+-     * In kernel mode (!is_user), __TEXT_EXEC is Read-Only (AP=RO) after arm_vm_init()
+-     * and __DATA/__bss (lse_kernel_pool) is marked PXN=1 (Privileged Execute-Never),
+-     * so kernel LSE instructions must be emulated directly via lse_emulate_atomic().
+-     */
++    /* Attempt branch island trampoline installation (EL0 only; kernel emulates directly on VA) */
+     if (is_user && lse_try_patch_island(elr, &dec, is_user)) {
+         /* Island installed! Emulate first trap atomically via direct LL/SC */
+         lse_emulate_atomic(state, &dec, is_user);
+@@ -771,3 +720,7 @@
+     set_saved_state_pc(state, elr + 4);
+     return true;
+ }
++
++#if defined(__clang__)
++#pragma clang attribute pop
++#endif

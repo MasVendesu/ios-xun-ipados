@@ -1,0 +1,12 @@
+diff --git a/bsd/sys/redwood_input.h b/bsd/sys/redwood_input.h
+--- a/bsd/sys/redwood_input.h
++++ b/bsd/sys/redwood_input.h
+@@ -41,6 +41,8 @@
+ void redwood_input_init(void);
+ void redwood_virtio_input_init(void);   /* boot-arg virtio_input=1: QEMU's virtio pointer and keyboard */
+ void redwood_goodix_init(void);         /* boot-arg touchscreen=1: the phone's Goodix or FocalTech touch screen */
++void hakios_dada_touch_init(void);    /* boot-arg dadatouch=1: the Xiaomi 15's Synaptics touch screen */
++void hakios_dada_gpu_init(void);      /* boot-arg dadagpu=N: steps of the Xiaomi 15's Adreno 830 bring-up */
+ void redwood_buttons_init(void);        /* boot-arg buttons=1: the phone's power and volume keys */
+ void redwood_ufs_init(void);           /* ufs=2 to xnuloader: the phone's storage, read only, through the loader (ufs_shared_pa=) */
+ void redwood_ufs_report(const char *when); /* where reading the storage has spent its time so far */

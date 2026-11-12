@@ -1,0 +1,26 @@
+diff --git a/EXTERNAL_HEADERS/image4/image4.h b/EXTERNAL_HEADERS/image4/image4.h
+--- a/EXTERNAL_HEADERS/image4/image4.h
++++ b/EXTERNAL_HEADERS/image4/image4.h
+@@ -94,6 +94,22 @@
+ #include <sys/cdefs.h>
+ #endif
+ 
++/*
++ * Non-Apple clang does not expand the SDK's availability annotation macros (the
++ * __API_AVAILABLE_GET_MACRO pick is one platform short), and the macros below are
++ * built out of them. Leave them out: they annotate only.
++ */
++#if !__has_feature(attribute_availability_app_extension) || !defined(__apple_build_version__)
++#undef API_AVAILABLE
++#define API_AVAILABLE(...)
++#undef API_DEPRECATED
++#define API_DEPRECATED(...)
++#undef API_DEPRECATED_WITH_REPLACEMENT
++#define API_DEPRECATED_WITH_REPLACEMENT(...)
++#undef API_UNAVAILABLE
++#define API_UNAVAILABLE(...)
++#endif
++
+ #if !defined(__BEGIN_DECLS)
+ #if defined(__cplusplus)
+ #define __BEGIN_DECLS   extern "C" {

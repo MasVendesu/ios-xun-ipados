@@ -1,0 +1,174 @@
+diff --git a/bsd/kern/kern_minimac.c b/bsd/kern/kern_minimac.c
+--- a/bsd/kern/kern_minimac.c
++++ b/bsd/kern/kern_minimac.c
+@@ -36,7 +36,9 @@
+ #include <kern/task.h>
+ #include <mach/vm_param.h>
+ #include <vm/vm_kern.h>
++#include <vm/vm_kern_xnu.h>
+ #include <vm/vm_map.h>
++#include <vm/vm_map_xnu.h>  /* xnu-12377 internal VM API split */
+ #include <security/mac_framework.h>
+ #include <security/mac_policy.h>
+ 
+@@ -68,7 +70,12 @@
+  * our own library be loaded into stock daemons (DYLD_INSERT_LIBRARIES).
+  */
+ #define AMFI_SYSCALL_CHECK_DYLD_POLICY  0x5a
+-#define AMFI_DYLD_OUTPUT_ALLOW_ALL      0xffULL
++/*
++ * (Bit 8 since iOS 17 or so: the development variables. libsystem_trace honours OS_ACTIVITY_DT_MODE,
++ * ACTIVITY_LOG_STDERR and the like -- os_log on standard error -- only when it is set:
++ * _os_trace_allow_development_env_vars.)
++ */
++#define AMFI_DYLD_OUTPUT_ALLOW_ALL      0x1ffULL
+ 
+ /*
+  * Request 0x60, "query boot-arg state" (amfi_interface_query_bootarg_state() in libamfi): the
+@@ -84,10 +91,20 @@
+  * of them.)
+  */
+ #define AMFI_SYSCALL_QUERY_BOOTARG_STATE 0x60
++
++/*
++ * Request 0x66, "does this process meet this constraint" (amfi_launch_constraint_matches_process()
++ * in libamfi; libxpc asks it for every peer requirement, e.g. "has this entitlement"): the argument
++ * is { audit token (32 bytes), constraint, its size, result, the result's size } and the result a
++ * 32-bit code, 0 for a match, then text. Nothing is enforced here, so every constraint is met.
++ * Unanswered, libamfi said "no match" while the result it left behind said 0, and libxpc asserts
++ * that the two agree: backboardd died of it at its first peer requirement (LaunchServices').
++ */
++#define AMFI_SYSCALL_CONSTRAINT_MATCH   0x66
+ #define AMFI_BOOTARG_STATE_NOT_ENFORCING 0x86ULL
+ 
+ static int
+-miniamfi_policy_syscall(__unused struct proc *p, int call, user_addr_t arg)
++miniamfi_policy_syscall(struct proc *p, int call, user_addr_t arg)
+ {
+ 	struct {
+ 		uint64_t input_flags;
+@@ -100,9 +117,39 @@
+ 	if (call == AMFI_SYSCALL_QUERY_BOOTARG_STATE) {
+ 		return copyout(&state, arg, sizeof(state));
+ 	}
++	if (call == AMFI_SYSCALL_CONSTRAINT_MATCH) {
++		struct {
++			uint8_t     token[32];
++			user_addr_t constraint;
++			uint32_t    constraint_size;
++			uint32_t    pad;
++			user_addr_t result;
++			uint32_t    result_size;
++		} match;
++		uint32_t matched = 0;
++
++		error = copyin(arg, &match, sizeof(match));
++		if (error == 0 && match.result != 0 && match.result_size >= sizeof(matched)) {
++			error = copyout(&matched, match.result, sizeof(matched));
++		}
++		return error;
++	}
+ 	if (call != AMFI_SYSCALL_CHECK_DYLD_POLICY) {
+ 		return ENOPOLICY;               /* what user space got before there was a handler */
+ 	}
++	/*
++	 * boot-arg inject_strict=1: backboardd may not go on without an inserted library (bit 0x20, "failed
++	 * insertions allowed", cleared): dyld halts with its reason instead of dropping the library silently
++	 * (and kern_exit.c logs the reason).
++	 */
++	{
++		uint32_t strict = 0;
++
++		if (PE_parse_boot_argn("inject_strict", &strict, sizeof(strict)) && strict && p != NULL &&
++		    strcmp(proc_best_name(p), "backboardd") == 0) {
++			flags &= ~0x20ULL;
++		}
++	}
+ 	error = copyin(arg, &args, sizeof(args));
+ 	if (error == 0) {
+ 		error = copyout(&flags, args.output_flags, sizeof(flags));
+@@ -147,9 +194,81 @@
+ static int
+ minisandbox_container_path(user_addr_t arg)
+ {
+-	(void)arg;
+-	/* In XNU 12377: sandbox container query stub */
+-	return 0;
++	struct {
++		int64_t     pid;
++		uint64_t    pidversion;
++		user_addr_t buffer;
++		user_size_t size;
++		uint64_t    check_pidversion;
++	} args;
++	const size_t prefix_len = sizeof(SANDBOX_CONTAINER_VARIABLE) - 1;
++	proc_t p;
++	task_t task;
++	vm_map_t map;
++	vm_map_copy_t copy = NULL;
++	vm_offset_t strings = 0;
++	vm_size_t strings_size;
++	user_addr_t user_stack;
++	size_t argslen, len;
++	const char *s, *end;
++	int error;
++
++	error = copyin(arg, &args, sizeof(args));
++	if (error) {
++		return error;
++	}
++	p = proc_find((int)args.pid);
++	if (p == PROC_NULL) {
++		return ESRCH;
++	}
++	if (args.check_pidversion && (uint64_t)proc_pidversion(p) != args.pidversion) {
++		proc_rele(p);
++		return ESRCH;
++	}
++	user_stack = p->user_stack;
++	argslen = p->p_argslen;
++	task = proc_task(p);
++	if (user_stack == 0 || argslen == 0 || task == TASK_NULL) {
++		proc_rele(p);
++		return 0;
++	}
++	/* the same way as sysctl_procargsx(): the task keeps the map alive once the process is let go */
++	task_reference(task);
++	proc_rele(p);
++	map = get_task_map_reference(task);
++	task_deallocate(task);
++	if (map == VM_MAP_NULL) {
++		return 0;
++	}
++	strings_size = vm_map_round_page(argslen, vm_map_page_mask(map));
++	if (kmem_alloc(kernel_map, &strings, strings_size, KMA_DATA | KMA_ZERO, VM_KERN_MEMORY_BSD) != KERN_SUCCESS) {
++		vm_map_deallocate(map);
++		return ENOMEM;
++	}
++	if (vm_map_copyin(map, (vm_map_address_t)(user_stack - strings_size), strings_size, FALSE, &copy) != KERN_SUCCESS) {
++		copy = NULL;
++	}
++	vm_map_deallocate(map);
++	if (copy == NULL || vm_map_copy_overwrite(kernel_map, strings, copy, strings_size, FALSE) != KERN_SUCCESS) {
++		if (copy != NULL) {
++			vm_map_copy_discard(copy);
++		}
++		kmem_free(kernel_map, strings, strings_size);
++		return 0;                       /* the process is on its way out, or has unmapped its own stack */
++	}
++
++	end = (const char *)(strings + strings_size);
++	for (s = end - argslen; s < end; s += len + 1) {
++		len = strnlen(s, end - s);
++		if (len > prefix_len && s + len < end && strncmp(s, SANDBOX_CONTAINER_VARIABLE, prefix_len) == 0) {
++			s += prefix_len;
++			len -= prefix_len;
++			error = len < args.size ? copyout(s, args.buffer, len + 1) : ENAMETOOLONG;
++			break;
++		}
++	}
++	kmem_free(kernel_map, strings, strings_size);
++	return error;
+ }
+ 
+ /* Which request numbers have been seen: one log line each, to learn what user space asks for. */

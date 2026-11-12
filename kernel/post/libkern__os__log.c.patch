@@ -1,0 +1,17 @@
+diff --git a/libkern/os/log.c b/libkern/os/log.c
+--- a/libkern/os/log.c
++++ b/libkern/os/log.c
+@@ -1152,10 +1152,13 @@
+ 
+ #ifdef CONFIG_XNUPOST
+ 
++/* Both compare addresses of objects, which only Apple's clang folds at compile time. */
++#if defined(__apple_build_version__)
+ static_assert(&_os_log_default == OS_LOG_DEFAULT,
+     "OS_LOG_DEFAULT is an alias to _os_log_default");
+ static_assert(OS_LOG_DISABLED == NULL,
+     "OS_LOG_DISABLED handle is defined as NULL");
++#endif
+ 
+ #include <dev/random/randomdev.h>
+ #include <tests/xnupost.h>

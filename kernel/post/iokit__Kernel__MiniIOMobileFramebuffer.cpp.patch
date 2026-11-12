@@ -1,0 +1,494 @@
+diff --git a/iokit/Kernel/MiniIOMobileFramebuffer.cpp b/iokit/Kernel/MiniIOMobileFramebuffer.cpp
+--- a/iokit/Kernel/MiniIOMobileFramebuffer.cpp
++++ b/iokit/Kernel/MiniIOMobileFramebuffer.cpp
+@@ -41,6 +41,18 @@
+ #include "MiniIOSurface.h"
+ 
+ extern "C" void redwood_tl(const char * format, ...) __printflike(1, 2);
++/* dada: the display controller showing the frames from buffers of its own (bsd/dev/hakios_dada_dpu.c, dadascan=1) */
++extern "C" {
++int hakios_dada_scanout_init(uint64_t fb, uint32_t panel_w, uint32_t panel_h, uint32_t row_bytes, uint32_t frame_bytes);
++uint8_t * hakios_dada_scanout_buffer(uint32_t bytes);
++bool hakios_dada_scanout_show(uint32_t stride, uint32_t w, uint32_t h);
++void hakios_dada_scanout_panel(void);
++void hakios_dada_scanout_end(uint8_t * fb, uint32_t row_bytes);
++uint64_t kvtophys(vm_offset_t va);
++}
++/* hakios: once user space owns the console the kernel's IOLog reaches no log we can read: say it in the loader's */
++#define IOLog(...) redwood_tl(__VA_ARGS__)
++
+ 
+ /* IOConnectCallMethod selectors of the framebuffer user client (iOS 16.5) */
+ enum {
+@@ -75,6 +87,8 @@
+ #define SWAP_DEST(layer)        (0xc4 + 16 * (layer))   /* x, y, width, height on the display */
+ #define SWAP_LAYERS_SET         0x104                   /* bit per layer given in this swap */
+ #define SWAP_LAYERS_CLEARED     0x108
++#define SWAP26_SIZE             0x588                   /* iOS 26's request ... */
++#define SWAP26_SHIFT            0x48                    /* ... with these fields that much further on */
+ #define SWAP_LAYERS             4
+ 
+ #define kFBNotifyVSync          5
+@@ -84,6 +98,8 @@
+ #define FRAME_TIMES             64                      /* milliseconds told apart between two frames */
+ #define FRAME_PAUSE             90                      /* from so many on, nothing was moving: not a slow frame */
+ #define SWAP_GPU_MS             500                     /* a frame the GPU has not drawn by then is shown as it is */
++#define SWAP_NEW_MS             33                      /* ... and one not yet given to the GPU at all is waited for this long (show()) */
++#define SHOWN_SLOTS             8                       /* the surfaces whose last shown submission is kept (fShown) */
+ #define SWAP_HELD_MS            700                     /* a swap that cannot be taken by then is not shown at all */
+ 
+ #define FOURCC(a, b, c, d) ((uint32_t)(a) << 24 | (uint32_t)(b) << 16 | (uint32_t)(c) << 8 | (uint32_t)(d))
+@@ -274,6 +290,11 @@
+ 	uint64_t        fSwapTime;              /* when the last swap was handed over */
+ 	uint32_t        fStatSwapsLate;         /* swaps that came more than a refresh and a quarter after the one before (and no pause) */
+ 	uint64_t        fStatWaiting;           /* how long frames waited for the GPU here */
++	struct {
++		uint32_t sid, drawn;
++	}               fShown[SHOWN_SLOTS];    /* show(): the GPU submission each surface was last shown after */
++	unsigned        fShownNext;
++	uint32_t        fStatStale, fStatStaleShown; /* swaps of a surface not drawn again since shown; still not after SWAP_NEW_MS */
+ 	/* how the display is doing: frames and time spent drawing them here since fStatSince */
+ 	uint32_t        fStatFrames;
+ 	uint64_t        fStatSince, fStatDrawing;
+@@ -314,10 +335,20 @@
+ 	unsigned        fHelpersBusy, fHelpersStarted;
+ 	uint32_t *      fHelperBlend[7];
+ 	void record(MiniIOSurface * s);
++	/*
++	 * dada (dadascan=1): a frame that is one surface of the whole display is copied as it is, row for row, into a
++	 * buffer of the display controller's, which then shows it -- no scaling here, and the panel's memory untouched.
++	 */
++	bool            fScan;
++	uint32_t        fScanShown, fScanCopied;
++	uint64_t        fScanCopying;
++	bool scanout(MiniIOSurface * s, const int32_t * src, const int32_t * dst);
+ };
+ 
+ OSDefineMetaClassAndStructors(IOMobileFramebuffer, IOService);
+ 
++static IOMobileFramebuffer * gFramebuffer;      /* (for MiniIOMobileFramebufferEnd) */
++
+ static void
+ setNumber(OSDictionary * dict, const char * key, uint64_t value)
+ {
+@@ -341,52 +372,133 @@
+ void
+ IOMobileFramebuffer::publishModes(void)
+ {
+-	OSDictionary * timing = OSDictionary::withCapacity(8);
+-	OSDictionary * horizontal = OSDictionary::withCapacity(4);
+-	OSDictionary * vertical = OSDictionary::withCapacity(4);
+-	OSDictionary * color = OSDictionary::withCapacity(8);
++	/*
++	 * iOS 26 takes the modes the way a real phone's display driver lays them out (an M1's AppleCLCD2,
++	 * read with ioreg, is the model here): besides the attributes, each element carries its binary
++	 * description (ElementData), and the timing says it is the preferred one. With only the attributes
++	 * iOS 16.5 was content; iOS 26 found no preferred mode ("preferred mode (0 x 0)", current mode
++	 * 16383 x 16383) and never drew. The porches are made up, the pixel clock follows from them.
++	 */
++	const uint32_t hz = refreshHz();
++	const uint32_t hSync = 32, hBack = 42, hFront = 8, vSync = 8, vBack = 42, vFront = 32;
++	const uint32_t hTotal = fWidth + hSync + hBack + hFront, vTotal = fHeight + vSync + vBack + vFront;
++	const uint64_t pixelClock = (uint64_t) hTotal * vTotal * hz;
++	const uint32_t lineRate = (uint32_t) (((pixelClock << 16) / hTotal) / 1000);     /* kHz, 16.16 */
++	const uint32_t frameRate = hz << 16;                                            /* Hz, 16.16 */
++	uint32_t timingData[20] = {
++		0, hTotal, fWidth, hSync, hBack, hFront, lineRate, 1, 0,
++		vTotal, fHeight, vSync, vBack, vFront, frameRate, 1, 0,
++		(uint32_t) pixelClock, 13, 0,
++	};
++	uint8_t colorData[32] = { 8 };
++	OSDictionary * timing = OSDictionary::withCapacity(24);
++	OSDictionary * horizontal = OSDictionary::withCapacity(9);
++	OSDictionary * vertical = OSDictionary::withCapacity(9);
++	OSDictionary * color = OSDictionary::withCapacity(12);
++	OSDictionary * refresh = OSDictionary::withCapacity(6);
++	OSDictionary * attributes = OSDictionary::withCapacity(1);
++	OSDictionary * product = OSDictionary::withCapacity(1);
+ 	OSArray * timings = OSArray::withCapacity(1);
+ 	OSArray * colors = OSArray::withCapacity(1);
+-	const uint32_t rate = refreshHz() << 16;                /* 16.16 fixed point */
++	OSArray * none = OSArray::withCapacity(1);
++	OSData * data;
++	uint64_t frameTicks;
+ 
+-	if (timing == NULL || horizontal == NULL || vertical == NULL || color == NULL || timings == NULL || colors == NULL) {
++	if (timing == NULL || horizontal == NULL || vertical == NULL || color == NULL || refresh == NULL ||
++	    attributes == NULL || product == NULL || timings == NULL || colors == NULL || none == NULL) {
+ 		return;
+ 	}
++	colorData[12] = 16;                                     /* colorimetry */
+ 	setNumber(color, "ID", kFBColorID);
++	setNumber(color, "ElementType", 1);
++	setNumber(color, "StandardType", 0);
+ 	setNumber(color, "PixelEncoding", 0);                   /* RGB 4:4:4 */
+ 	setNumber(color, "Depth", 8);
+-	setNumber(color, "Colorimetry", 1);
+-	setNumber(color, "EOTF", 1);
++	setNumber(color, "Colorimetry", 16);
++	setNumber(color, "EOTF", 0);
+ 	setNumber(color, "DynamicRange", 0);
+-	setNumber(color, "Score", 1);
++	setNumber(color, "SupportsDSC", 0);
++	setNumber(color, "Score", 240999);
+ 	color->setObject("IsVirtual", kOSBooleanFalse);
++	if ((data = OSData::withBytes(colorData, sizeof(colorData))) != NULL) {
++		color->setObject("ElementData", data);
++		data->release();
++	}
+ 	colors->setObject(color);
+ 
+ 	setNumber(horizontal, "Active", fWidth);
+-	setNumber(horizontal, "Total", fWidth);
+-	setNumber(horizontal, "SyncRate", rate);
+-	setNumber(horizontal, "PreciseSyncRate", rate);
++	setNumber(horizontal, "Total", hTotal);
++	setNumber(horizontal, "SyncWidth", hSync);
++	setNumber(horizontal, "BackPorch", hBack);
++	setNumber(horizontal, "FrontPorch", hFront);
++	setNumber(horizontal, "SyncPolarity", 1);
++	setNumber(horizontal, "PixelRepetition", 0);
++	setNumber(horizontal, "SyncRate", lineRate);
++	setNumber(horizontal, "PreciseSyncRate", lineRate);
+ 	setNumber(vertical, "Active", fHeight);
+-	setNumber(vertical, "Total", fHeight);
+-	setNumber(vertical, "SyncRate", rate);
+-	setNumber(vertical, "PreciseSyncRate", rate);
++	setNumber(vertical, "Total", vTotal);
++	setNumber(vertical, "SyncWidth", vSync);
++	setNumber(vertical, "BackPorch", vBack);
++	setNumber(vertical, "FrontPorch", vFront);
++	setNumber(vertical, "SyncPolarity", 1);
++	setNumber(vertical, "PixelRepetition", 0);
++	setNumber(vertical, "SyncRate", frameRate);
++	setNumber(vertical, "PreciseSyncRate", frameRate);
+ 	setNumber(timing, "ID", kFBTimingID);
+-	setNumber(timing, "Score", 1);
++	setNumber(timing, "ElementType", 0);
++	setNumber(timing, "StandardType", 0);
++	setNumber(timing, "TimingType", 3);
++	setNumber(timing, "ScanInformation", 0);
++	setNumber(timing, "Score", 16346);
++	setNumber(timing, "AspectRatio", 13);
++	setNumber(timing, "PreciseAspectRatio", (uint64_t) fWidth * 65536 / fHeight);
++	setNumber(timing, "ValidPixelEncodings", 1);
++	setNumber(timing, "MinimumVariableRefreshRate", 0);
++	setNumber(timing, "MaximumVariableRefreshRate", 0);
++	timing->setObject("IsPreferred", kOSBooleanTrue);
+ 	timing->setObject("IsVirtual", kOSBooleanFalse);
+ 	timing->setObject("IsOverscanned", kOSBooleanFalse);
++	timing->setObject("IsInterlaced", kOSBooleanFalse);
++	timing->setObject("IsSplit", kOSBooleanFalse);
++	timing->setObject("IsPromoted", kOSBooleanFalse);
+ 	timing->setObject("HorizontalAttributes", horizontal);
+ 	timing->setObject("VerticalAttributes", vertical);
+ 	timing->setObject("ColorModes", colors);
++	timing->setObject("DiscreteMediaRefreshRates", none);
++	timing->setObject("UnsafeColorElementIDs", none);
++	timing->setObject("DSCRequiredColorElementIDs", none);
++	if ((data = OSData::withBytes(timingData, sizeof(timingData))) != NULL) {
++		timing->setObject("ElementData", data);
++		data->release();
++	}
+ 	timings->setObject(timing);
+ 
+ 	setProperty("TimingElements", timings);
+ 	setProperty("ColorElements", colors);
++	setProperty("DPTimingModeId", kFBTimingID, 32);
++	setProperty("DisplayWidth", fWidth, 32);
++	setProperty("DisplayHeight", fHeight, 32);
++	setProperty("PixelClock", pixelClock, 64);
++	attributes->setObject("ProductAttributes", product);
++	setProperty("DisplayAttributes", attributes);
++	nanoseconds_to_absolutetime(NSEC_PER_SEC / hz, &frameTicks);
++	setNumber(refresh, "displayMinRefreshInterval", (1ULL << 32) / hz);
++	setNumber(refresh, "displayMaxRefreshInterval", (1ULL << 32) / hz);
++	setNumber(refresh, "displayMinRefreshIntervalMachTime", frameTicks);
++	setNumber(refresh, "displayMaxRefreshIntervalMachTime", frameTicks);
++	setNumber(refresh, "displayRefreshStep", 0);
++	setNumber(refresh, "displayRefreshStepMachTime", 0);
++	setProperty("IOMFBDisplayRefresh", refresh);
+ 	OSSafeReleaseNULL(timings);
+ 	OSSafeReleaseNULL(colors);
++	OSSafeReleaseNULL(none);
+ 	OSSafeReleaseNULL(timing);
+ 	OSSafeReleaseNULL(horizontal);
+ 	OSSafeReleaseNULL(vertical);
+ 	OSSafeReleaseNULL(color);
++	OSSafeReleaseNULL(refresh);
++	OSSafeReleaseNULL(attributes);
++	OSSafeReleaseNULL(product);
+ }
+ 
+ bool
+@@ -448,6 +560,13 @@
+ 	fDiffLeft = fDiffTop = ~0u;
+ 	IOLog("MiniIOMobileFramebuffer: display %ux%u on a panel of %ux%u (%u bytes per row)\n", fWidth, fHeight,
+ 	    fPanelWidth, fPanelHeight, fRowBytes);
++	/* (the frame: rows of 4 bytes a pixel, padded to 64 bytes as IOSurface pads them, and a little to spare) */
++	fScan = hakios_dada_scanout_init(kvtophys((vm_offset_t) vinfo.v_baseaddr), fPanelWidth, fPanelHeight, fRowBytes,
++	    ((fWidth * 4 + 255) & ~255u) * fHeight) == 0;
++	if (fScan) {
++		IOLog("MiniIOMobileFramebuffer: the display controller shows the frames from buffers of its own\n");
++	}
++	gFramebuffer = this;
+ 
+ 	if (gRecSeconds != 0) {
+ 		/* one piece of physical memory: the loader will send it over USB as it lies */
+@@ -525,7 +644,11 @@
+ 		fRecWrapped = true;
+ 	}
+ 	frame = (struct rec_frame *) (fRecBase + fRecUsed);
+-	frame->nanoseconds = since_start;
++	/*
++	 * (dada: the surface it came from and the low bits of its last GPU submission ride in the time's top bits -- a run is far
++	 * shorter than 2^40 ns -- for telling which buffer a frame that flickers was: tools/recording.py writes them to tags.txt)
++	 */
++	frame->nanoseconds = (since_start & ((1ull << 40) - 1)) | (uint64_t) (s->sid & 0xffff) << 40 | (uint64_t) (s->drawn & 0xff) << 56;
+ 	to = (uint8_t *) (frame + 1);
+ 	for (uint32_t y = 0; y < header->height; y++) {
+ 		const uint32_t * from = (const uint32_t *) (s->pixels() + (size_t) (y * REC_STEP + 1) * s->info.bytesPerRow);
+@@ -927,6 +1050,45 @@
+ 	}
+ }
+ 
++/*
++ * dada: the surface shown by the display controller from a buffer of its own, if it can be: 32 bits a pixel, one
++ * plane, of the display's whole size. False: it is drawn onto the panel as before.
++ */
++bool
++IOMobileFramebuffer::scanout(MiniIOSurface * s, const int32_t * src, const int32_t * dst)
++{
++	uint32_t bytes = s->info.bytesPerRow * s->info.height;
++	uint64_t began = mach_absolute_time(), nanos;
++	uint8_t * buffer;
++
++	(void) src;
++	(void) dst;
++	if (s->info.bytesPerElement != 4 || s->info.planeCount != 0 || s->info.width != fWidth || s->info.height != fHeight ||
++	    (buffer = hakios_dada_scanout_buffer(bytes)) == NULL) {
++		return false;
++	}
++	/*
++	 * What the GPU drew is in memory and not in this processor's cache, which may still hold lines of the surface
++	 * from before -- the zeros it was made with, or the last frame copied out of it -- and a copy would read those:
++	 * black or stale blocks that come and go as the lines do. Out of the cache first (clean and invalidate).
++	 */
++	for (uintptr_t line = (uintptr_t) s->pixels() & ~(uintptr_t) 63; line < (uintptr_t) s->pixels() + bytes; line += 64) {
++		__asm__ volatile ("dc civac, %0" : : "r" (line) : "memory");
++	}
++	__asm__ volatile ("dsb sy" ::: "memory");
++	memcpy(buffer, s->pixels(), bytes);
++	fScanCopying += mach_absolute_time() - began;
++	if (!hakios_dada_scanout_show(s->info.bytesPerRow, s->info.width, s->info.height)) {
++		return false;
++	}
++	if (++fScanShown % 600 == 1) {
++		absolutetime_to_nanoseconds(fScanCopying, &nanos);
++		IOLog("MiniIOMobileFramebuffer: %u frames shown from the display's buffers, %llu us a copy (surface %u, %u bytes a "
++		    "row)\n", fScanShown, nanos / fScanShown / NSEC_PER_USEC, s->sid, s->info.bytesPerRow);
++	}
++	return true;
++}
++
+ /* A swap's surfaces onto the panel, once the GPU is done with them. */
+ void
+ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
+@@ -937,6 +1099,40 @@
+ 	MiniIOSurface * recorded = NULL;
+ 	bool report;
+ 
++	/*
++	 * dada: a swap can come before the GPU work that draws its surface has reached the kernel (the render server swaps once its
++	 * command buffer is scheduled, and the runtime or Turnip may hand it over later): the surface's last submission is then the one
++	 * of its frame two or three swaps ago, long done, and that old picture went on the panel -- the flicker of everything that moves
++	 * (still frames are the same picture). A surface whose last submission has not changed since it was last shown is waited for, up
++	 * to SWAP_NEW_MS, to be named by a newer one; then for the GPU, as before.
++	 */
++	for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
++		MiniIOSurface * s = surfaces[layer];
++		unsigned slot;
++
++		if (s == NULL) {
++			continue;
++		}
++		for (slot = 0; slot < SHOWN_SLOTS && fShown[slot].sid != s->sid; slot++) {
++		}
++		if (slot < SHOWN_SLOTS && fShown[slot].drawn == s->drawn && s->drawn != 0) {
++			uint64_t waited = 0;
++
++			while (s->drawn == fShown[slot].drawn && waited < SWAP_NEW_MS) {
++				IOSleep(1);
++				waited++;
++			}
++			fStatStale++;
++			if (s->drawn == fShown[slot].drawn) {
++				fStatStaleShown++;
++			}
++		}
++		if (slot == SHOWN_SLOTS) {
++			slot = fShownNext++ % SHOWN_SLOTS;
++			fShown[slot].sid = s->sid;
++		}
++		fShown[slot].drawn = s->drawn;
++	}
+ 	for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
+ 		if (surfaces[layer] != NULL && !MiniIOSurfaceDrawn(surfaces[layer], SWAP_GPU_MS)) {
+ 			IOLog("MiniIOMobileFramebuffer: swap %u: the GPU is not done with surface %u after %u ms; shown as it is\n",
+@@ -945,7 +1141,7 @@
+ 	}
+ 	fStatWaiting += mach_absolute_time() - began;
+ 	began = ready = mach_absolute_time();
+-	if (gOnTheBeat) {
++	if (gOnTheBeat && !fScan) {        /* (scanning out, the display's own refresh paces the frames) */
+ 		uint64_t period, aim, next;
+ 
+ 		nanoseconds_to_absolutetime(NSEC_PER_SEC / refreshHz(), &period);
+@@ -994,12 +1190,36 @@
+ 		    swapWord(swap, SWAP_ID), fSwapsShown, swapWord(swap, SWAP_SURFACE(0)), swapWord(swap, SWAP_SURFACE(1)),
+ 		    swapWord(swap, SWAP_SURFACE(2)), swapWord(swap, SWAP_SURFACE(3)), set, swapWord(swap, SWAP_LAYERS_CLEARED));
+ 	}
++	bool scanned = false;
++	if (fScan && swapWord(swap, SWAP_SURFACE(1)) == 0 && swapWord(swap, SWAP_SURFACE(2)) == 0 &&
++	    swapWord(swap, SWAP_SURFACE(3)) == 0 && surfaces[0] != NULL) {
++		int32_t src[4], dst[4];
++
++		memcpy(src, swap + SWAP_SOURCE(0), sizeof(src));
++		memcpy(dst, swap + SWAP_DEST(0), sizeof(dst));
++		scanned = scanout(surfaces[0], src, dst);
++	}
++	if (fScan && !scanned) {
++		if (fScanCopied++ < 4) {
++			IOLog("MiniIOMobileFramebuffer: swap %u is copied by the CPU (surfaces %u %u %u %u)\n", swapWord(swap, SWAP_ID),
++			    swapWord(swap, SWAP_SURFACE(0)), swapWord(swap, SWAP_SURFACE(1)), swapWord(swap, SWAP_SURFACE(2)),
++			    swapWord(swap, SWAP_SURFACE(3)));
++		}
++		hakios_dada_scanout_panel();
++	}
+ 	for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
+ 		uint32_t sid = swapWord(swap, SWAP_SURFACE(layer));
+ 		int32_t src[4], dst[4];
+ 		MiniIOSurface * s;
+ 
+ 		layers |= sid != 0 ? 1u << layer : 0;
++		if (scanned) {
++			if (layer == 0) {
++				recorded = surfaces[0];
++				fGraphics = true;
++			}
++			continue;
++		}
+ 		/* the frames' surfaces: is it a few, in turn? */
+ 		for (unsigned i = 0; layer == 0 && sid != 0 && i < 8; i++) {
+ 			if (fStatSurfaces[i] == 0 || fStatSurfaces[i] == sid) {
+@@ -1010,8 +1230,17 @@
+ 		if (sid == 0) {
+ 			/* the bottom layer taken away: nothing is shown, the screen is black */
+ 			if (layer == 0 && (set & 1) && fGraphics) {
++				/*
++				 * Plain aligned stores, not bzero: the panel's memory is device memory under the phone's
++				 * hypervisor, and bzero's DC ZVA and unaligned stores fault there ("Unaligned kernel data
++				 * abort" in IOMobileFramebuffer::show, the first time SpringBoard dropped the bottom layer).
++				 */
+ 				for (uint32_t y = 0; y < fPanelHeight; y++) {
+-					bzero(fBase + (size_t) y * fRowBytes, (size_t) fPanelWidth * 4);
++					volatile uint64_t *row = (volatile uint64_t *) (fBase + (size_t) y * fRowBytes);
++
++					for (uint32_t x = 0; x < fPanelWidth / 2; x++) {
++						row[x] = 0;
++					}
+ 				}
+ 			}
+ 			continue;
+@@ -1078,7 +1307,37 @@
+ 		    fStatFrames * NSEC_PER_SEC / nanos, drawing / fStatFrames / NSEC_PER_USEC,
+ 		    waiting / fStatFrames / NSEC_PER_USEC, fStatOnBeat, fStatOnBeat ? beat / fStatOnBeat / NSEC_PER_USEC : 0,
+ 		    fStatHeld, fStatLost, fStatSwapsLate);
+-		fStatSwapsLate = 0;
++		IOLog("MiniIOMobileFramebuffer: %u swaps came before the GPU work of their surface, %u of them shown without it\n",
++		    fStatStale, fStatStaleShown);
++		if (surfaces[0] != NULL) {
++			IOLog("MiniIOMobileFramebuffer: the last swap's surface %u: its last GPU submission %u (0: none ever named it)\n",
++			    surfaces[0]->sid, surfaces[0]->drawn);
++		}
++		fStatSwapsLate = fStatStale = fStatStaleShown = 0;
++		/*
++		 * The last swap as it came, every five seconds rather than for the first eight: the
++		 * first ones are lost from a long run's log, and with CoreAnimation's GPU renderer the
++		 * panel stayed on the loader's picture through hundreds of swaps that each cost 0 us
++		 * here -- swaps with no surface in them, or with one not found. The words of the header
++		 * that are not zero, offset:value, for what the window server put where.
++		 */
++		{
++			char words[400];
++			unsigned at = 0;
++
++			for (unsigned off = 0; off < 0x110 && at < sizeof(words) - 24; off += 4) {
++				uint32_t w = swapWord(swap, off);
++
++				if (w != 0) {
++					at += (unsigned) snprintf(words + at, sizeof(words) - at, " %x:%x", off, w);
++				}
++			}
++			words[at] = '\0';
++			IOLog("MiniIOMobileFramebuffer: the last swap: surfaces %u %u %u %u (found %d %d %d %d); words%s\n",
++			    swapWord(swap, SWAP_SURFACE(0)), swapWord(swap, SWAP_SURFACE(1)), swapWord(swap, SWAP_SURFACE(2)),
++			    swapWord(swap, SWAP_SURFACE(3)), surfaces[0] != NULL, surfaces[1] != NULL, surfaces[2] != NULL,
++			    surfaces[3] != NULL, words);
++		}
+ 		for (different = 0; different < 8 && fStatSurfaces[different] != 0; different++) {
+ 		}
+ 		if (different == 8 && fStatFrames > 8) {
+@@ -1110,6 +1369,20 @@
+ 	IOLockUnlock(fLock);
+ }
+ 
++/* The run is about to end (redwood_adreno_stop): the frame on screen back in the panel's memory, dada's display on it. */
++extern "C" void
++MiniIOMobileFramebufferEnd(void)
++{
++	IOMobileFramebuffer * fb = gFramebuffer;
++
++	if (fb != NULL && fb->fScan) {
++		IOLockLock(fb->fLock);
++		hakios_dada_scanout_end(fb->fBase, fb->fRowBytes);
++		fb->fScan = false;
++		IOLockUnlock(fb->fLock);
++	}
++}
++
+ /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+ 
+ class IOMobileFramebufferUserClient : public IOUserClient
+@@ -1151,6 +1424,11 @@
+ 		return false;
+ 	}
+ 	fTask = owningTask;
++	{
++		char procname[32] = "?";
++		proc_selfname(procname, sizeof(procname));
++		IOLog("MiniIOMobileFramebuffer: opened by %s[%d], type %u\n", procname, proc_selfpid(), (unsigned) type);
++	}
+ 	return true;
+ }
+ 
+@@ -1349,6 +1627,19 @@
+ 			IOLog("MiniIOMobileFramebuffer: swap request of %u bytes, expected %u\n", args->structureInputSize, SWAP_SIZE);
+ 			return kIOReturnBadArgument;
+ 		}
++		if (args->structureInputSize >= SWAP26_SIZE) {
++			/*
++			 * iOS 26's request (0x588 bytes) is iOS 16.5's with 0x48 bytes more ahead of the swap's own
++			 * fields: the ID, the layers' surfaces, source rectangles, flags, destination rectangles and the
++			 * masks of the layers set and cleared all sit 0x48 further on (kern_SwapBegin/SwapSetLayer in
++			 * IOMobileFramebuffer.framework). Seen from there it is the old one.
++			 */
++			uint8_t old[SWAP_SIZE];
++
++			memcpy(old, (const uint8_t *) args->structureInput + SWAP26_SHIFT, SWAP_SIZE);
++			fOwner->present(old);
++			return kIOReturnSuccess;
++		}
+ 		fOwner->present((const uint8_t *) args->structureInput);
+ 		return kIOReturnSuccess;
+ 

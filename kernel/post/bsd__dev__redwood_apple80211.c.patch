@@ -1,0 +1,13 @@
+diff --git a/bsd/dev/redwood_apple80211.c b/bsd/dev/redwood_apple80211.c
+--- a/bsd/dev/redwood_apple80211.c
++++ b/bsd/dev/redwood_apple80211.c
+@@ -462,7 +462,8 @@
+ 	unsigned unknown = 0;
+ 	int error;
+ 
+-	if (request->req_len != sizeof(*asked)) {
++	/* iOS 26's wifid sends 5528 bytes (72 more than the layout above, iOS 16's): the fields above are read from its start */
++	if (request->req_len < sizeof(*asked)) {
+ 		return EINVAL;
+ 	}
+ 	if (!redwood_sta_present()) {

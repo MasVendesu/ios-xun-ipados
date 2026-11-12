@@ -1,0 +1,16 @@
+diff --git a/iokit/IOKit/IOUserServer.h b/iokit/IOKit/IOUserServer.h
+--- a/iokit/IOKit/IOUserServer.h
++++ b/iokit/IOKit/IOUserServer.h
+@@ -165,6 +165,12 @@
+ {
+ 	OSDeclareDefaultStructorsWithDispatch(IOUserServer);
+ 
++public:
++	/* The iig-generated header does not carry this one: the dext-facing Panic() entry
++	 * point and the length its reason may have. */
++#define kIOUserServrMaxPanicReasonLength    1024
++	virtual kern_return_t  Panic_Impl(const char * reason);
++
+ 	IOLock       *        fLock;
+ 	IOSimpleLock *        fInterruptLock;
+ 	OSDictionary  *       fEntitlements;

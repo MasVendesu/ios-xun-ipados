@@ -1,0 +1,20 @@
+diff --git a/iokit/Kernel/MiniIOSurface.h b/iokit/Kernel/MiniIOSurface.h
+--- a/iokit/Kernel/MiniIOSurface.h
++++ b/iokit/Kernel/MiniIOSurface.h
+@@ -117,7 +117,16 @@
+ 	task_t                          clientTask;     /* whose memory it is (not held: only compared) */
+ 	mach_vm_address_t               clientAddress;  /* ... and where it is there */
+ 	uint8_t *                       kpixels;        /* where the pixel memory starts in the kernel, either way */
++	/*
++	 * ... and for a surface made around its maker's memory, a copy of the pixels as they were when it was made (or
++	 * last written under a lock: snapshotSeed), which is what the GPU draws from (RedwoodGPU.cpp). Its maker may draw
++	 * the next picture into the same memory as soon as the surface is handed over -- iconservicesagent does, and the
++	 * icons on the home screen showed the labels of other icons -- and what was handed over is what was there then.
++	 */
++	IOBufferMemoryDescriptor *      snapshot;
++	uint32_t                        snapshotSeed;
+ 	uint32_t                        drawn;          /* the GPU's last submission that names the pixels (0: none; RedwoodGPU.cpp) */
++	uint32_t                        drawnOn[2];     /* ... the last on each ring, with two (boot-arg dadagpu_preempt): `drawn` done is not both done */
+ 	struct minisurf_result          info;           /* addresses not filled in */
+ 	struct minisurf_plane           planes[MINISURF_MAX_PLANES];
+ 	OSDictionary *                  values;

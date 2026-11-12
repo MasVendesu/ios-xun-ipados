@@ -1,0 +1,14 @@
+diff --git a/osfmk/arm/cpu_common.c b/osfmk/arm/cpu_common.c
+--- a/osfmk/arm/cpu_common.c
++++ b/osfmk/arm/cpu_common.c
+@@ -78,7 +78,9 @@
+ #endif /* defined(HAS_IPI) */
+ 
+ #if DEVELOPMENT || DEBUG
+-static _Atomic(void (*)(void)) cpu_signal_test_vector = NULL;
++/* stock clang will not take a bare NULL as a constant initialiser for an _Atomic
++ * function pointer; the cast makes it one. */
++static _Atomic(void (*)(void)) cpu_signal_test_vector = (void (*)(void))NULL;
+ #endif /* DEVELOPMENT || DEBUG */
+ 
+ cpu_data_t *

@@ -1,0 +1,19 @@
+diff --git a/iokit/IOKit/IOExtensiblePaniclog.h b/iokit/IOKit/IOExtensiblePaniclog.h
+--- a/iokit/IOKit/IOExtensiblePaniclog.h
++++ b/iokit/IOKit/IOExtensiblePaniclog.h
+@@ -54,6 +54,15 @@
+ 	void free(void) APPLE_KEXT_OVERRIDE;
+ 
+ public:
++	/*
++	 * The five the DriverKit side calls. The generated header of this tree does not
++	 * declare them, so the kernel-side _Impl bodies have nothing to attach to.
++	 */
++	virtual kern_return_t SetActive();
++	virtual kern_return_t SetInactive();
++	virtual kern_return_t InsertData(OSData * data);
++	virtual kern_return_t SetUsedLen(uint32_t used_len);
++	virtual OSObject *     copyObject() const;
+ 
+ 	/*!
+ 	 * @brief       This function is to be called to create IOExtensiblePaniclog object.

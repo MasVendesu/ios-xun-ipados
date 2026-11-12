@@ -1,0 +1,20 @@
+diff --git a/bsd/conf/Makefile.template b/bsd/conf/Makefile.template
+--- a/bsd/conf/Makefile.template
++++ b/bsd/conf/Makefile.template
+@@ -44,6 +44,16 @@
+         -Warray-bounds-pointer-arithmetic
+ SFLAGS+= -include meta_features.h
+ 
++# Apple OSS HFS built in (bsd/xun_hfs): compiled like the kext, see
++# xun_hfs_compat.h. The compat header must come after the kernel's -D options,
++# hence _CFLAGS_ADD.
++XUN_HFS_ROOT = $(SRCROOT)/bsd/xun_hfs
++XUN_HFS_OBJS = BTree.o BTreeAllocate.o BTreeMiscOps.o BTreeNodeOps.o BTreeNodeReserve.o BTreeScanner.o BTreeTreeOps.o BTreeWrapper.o CatalogUtilities.o FileExtentMapping.o FileIDsServices.o MacOSStubs.o UnicodeWrappers.o VolumeAllocation.o hfs_attrlist.o hfs_btreeio.o hfs_catalog.o hfs_chash.o hfs_cnode.o hfs_cprotect.o hfs_endian.o hfs_extents.o hfs_fsinfo.o hfs_hotfiles.o hfs_journal.o hfs_link.o hfs_lookup.o hfs_notification.o hfs_quota.o hfs_readwrite.o hfs_resize.o hfs_search.o hfs_vfsops.o hfs_vfsutils.o hfs_vnops.o hfs_xattr.o rangelist.o hfs_encodinghint.o hfs_encodings.o xun_hfs_iokit.o
++$(foreach o,$(XUN_HFS_OBJS),$(eval $(o)_CFLAGS_ADD += -include $(XUN_HFS_ROOT)/xun_hfs_compat.h -I$(XUN_HFS_ROOT) -I$(XUN_HFS_ROOT)/core))
++# HFSEncodings is a separate kext on Apple with its own allocation counter.
++hfs_encodings.o_CFLAGS_ADD += -Dhfs_allocated=hfs_encodings_allocated
++hfs_encodinghint.o_CFLAGS_ADD += -Dhfs_allocated=hfs_encodings_allocated
++
+ #
+ # Directories for mig generated files
+ #

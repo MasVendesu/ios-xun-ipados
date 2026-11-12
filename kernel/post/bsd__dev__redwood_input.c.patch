@@ -1,0 +1,62 @@
+diff --git a/bsd/dev/redwood_input.c b/bsd/dev/redwood_input.c
+--- a/bsd/dev/redwood_input.c
++++ b/bsd/dev/redwood_input.c
+@@ -16,8 +16,6 @@
+ 
+ #define TOUCH_QUEUE     512             /* records; a power of two */
+ 
+-uint64_t redwood_touch_last = 0;
+-
+ /*
+  * Boot-arg touch_lat=1: for measuring how long a touch takes to reach the panel, a line for every
+  * sample posted ("tl: p TYPE FINGER X Y at US", the time in microseconds of mach_absolute_time),
+@@ -136,9 +134,13 @@
+ 	wakeup(&touch_queue);
+ }
+ 
++/* when a finger last touched the screen, in absolute time: the dada governor boosts the clocks for a while after (hakios_dada_cpu.c) */
++uint64_t redwood_touch_last;
++
+ void
+ redwood_touch_post(uint32_t type, uint32_t finger, uint32_t x, uint32_t y)
+ {
++	redwood_touch_last = mach_absolute_time();
+ 	touch_post(type, finger, x, y, true);
+ }
+ 
+@@ -219,6 +221,35 @@
+ 	redwood_cpufreq_init();
+ 	redwood_virtio_input_init();
+ 	redwood_goodix_init();
++	hakios_dada_touch_init();
++	{
++		extern void hakios_dada_gauge_init(void);
++
++		hakios_dada_gauge_init();      /* boot-arg dadagauge=1: the fuel gauge (hakios_dada_gauge.c) */
++	}
++	{
++		extern void hakios_dada_amp_init(void);
++
++		hakios_dada_amp_init();        /* boot-arg dadaamp=1: the speakers' amplifiers (hakios_dada_amp.c) */
++	}
++	{
++		extern void hakios_dada_audio_init(void);
++
++		hakios_dada_audio_init();      /* boot-arg dadaaudio=N: the sound's path (hakios_dada_audio.c) */
++		extern void hakios_dada_camera_init(void);
++
++		hakios_dada_camera_init();     /* boot-arg dadacam=N: the cameras (hakios_dada_camera.c) */
++		extern void hakios_dada_wifi_init(void);
++
++		hakios_dada_wifi_init();       /* boot-arg dadawifi=N: the Wi-Fi's PCIe link (hakios_dada_wifi.c) */
++		extern void hakios_dada_cpu_init(void);
++
++		hakios_dada_cpu_init();        /* boot-arg dadacpu=N: the CPU clocks through SCMI (hakios_dada_cpu.c) */
++		extern void hakios_prof_start(void);
++
++		hakios_prof_start();           /* boot-arg dadaprof=NAME: a sampling profiler (osfmk/arm64/hakios_prof.c) */
++	}
++	hakios_dada_gpu_init();
+ 	redwood_buttons_init();
+ 	redwood_battery_init();
+ 	redwood_ufs_init();

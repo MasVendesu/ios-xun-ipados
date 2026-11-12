@@ -20,6 +20,13 @@
 #undef FIFO
 #undef HFS_COMPRESSION
 #include "core/kext-config.h"
+/* TargetConditionals.h (pulled in by kext-config.h) says iPhone; the encodings
+ * interface is inside `#if !TARGET_OS_IPHONE` and the kernel build needs it. */
+#undef TARGET_OS_IPHONE
+#define TARGET_OS_IPHONE 0
+/* protection is off (no AppleKeyStore); the kext-config.h value is the kext's own */
+#undef CONFIG_PROTECT
+#define CONFIG_PROTECT 0
 
 /* Built in, not a loadable kext (see xun_hfs_iokit.c). */
 #define OSKextGetCurrentLoadTag xun_hfs_current_load_tag
